@@ -25,7 +25,7 @@
           #!/bin/bash
           /usr/bin/apt update && /usr/bin/apt upgrade -y && /usr/bin/apt autoremove -y
 
-    - name: Deploy AD privilege control rules
+    - n- name: Deploy AD privilege control rules
       copy:
         dest: /etc/sudoers.d/ad-policy
         mode: '0440'
@@ -35,9 +35,9 @@
           Defaults timestamp_timeout=15
           Defaults passwd_tries=3
           Defaults logfile="/var/log/sudo.log"
-          %"Domain Admins@sarvika.com" ALL=(ALL:ALL) ALL
-          %"Domain Users@sarvika.com" ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
-
+          %"domain admins@sarvika.com" ALL=(ALL:ALL) ALL
+          %"domain users@sarvika.com" ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
+          
     - name: Configure background automatic security patching
       copy:
         dest: /etc/apt/apt.conf.d/20auto-upgrades
