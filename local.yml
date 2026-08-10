@@ -25,7 +25,7 @@
           #!/bin/bash
           /usr/bin/apt update && /usr/bin/apt upgrade -y && /usr/bin/apt autoremove -y
 
-    - n- name: Deploy AD privilege control rules
+    - name: Deploy AD privilege control rules
       copy:
         dest: /etc/sudoers.d/ad-policy
         mode: '0440'
