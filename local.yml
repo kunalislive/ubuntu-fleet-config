@@ -1,0 +1,80 @@
+---
+- name: Enforce Central Ubuntu Fleet Policy
+  hosts: localhost
+  connection: local
+  become: yes
+  tasks:
+    - name: Deploy restricted update script
+      copy:
+        dest: /usr/local/bin/safe-update.sh
+        mode: '0755'
+        owner: root
+        group: root
+        content: |
+          #!/bin/bash
+          /usr/bin/apt update && /usr/bin/apt upgrade -y && /usr/bin/apt autoremove -y
+
+    - name: Deploy AD privilege control rules
+      copy:
+        dest: /etc/sudoers.d/ad-policy
+        mode: '0440'
+        owner: root
+        group: root
+        content: |
+          Defaults timestamp_timeout=15
+          Defaults passwd_tries=3
+          Defaults logfile="/var/log/sudo.log"
+          %"Domain Admins@sarvika.com" ALL=(ALL:ALL) ALL
+          %"Domain Users@sarvika.com" ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
+
+    - name: Configure background automatic security patching
+      copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::AutocleanInterval "7";
+
+    - name: Lock GNOME desktop settings (Disable autorun, enforce screen lock)
+      copy:
+        dest: /etc/dconf/db/local.d/00-security-locks
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          [org/gnome/desktop/media-handling]
+          autorun-never=true
+
+          [org/gnome/desktop/screensaver]
+          lock-enabled=true
+          lock-delay=uint32 300
+
+    - name: Blacklist USB Mass Storage Modules
+      copy:
+        dest: /etc/modprobe.d/block-usb-storage.conf
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          blacklist usb_storage
+          blacklist uas
+          install usb_storage /bin/true
+          install uas /bin/true
+
+    - name: Disable Polkit Network Hotspot Modifications
+      copy:
+        dest: /etc/polkit-1/localauthority/50-local.d/10-disable-hotspot.pkla
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          [Disable Hotspot]
+          Identity=unix-group:domain users@sarvika.com
+          Action=org.freedesktop.NetworkManager.settings.modify.system
+          ResultAny=no
+          ResultInactive=no
+          ResultActive=no
+```[cite: 1]
