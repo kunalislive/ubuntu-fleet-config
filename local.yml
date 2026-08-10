@@ -4,6 +4,12 @@
   connection: local
   become: yes
   tasks:
+
+    - name: Abort if not Ubuntu
+      fail:
+        msg: "This playbook is Ubuntu-only, refusing to run on {{ ansible_distribution }}"
+      when: ansible_distribution != "Ubuntu"
+
     - name: Ensure required configuration directories exist
       file:
         path: "{{ item }}"
@@ -13,6 +19,7 @@
         mode: '0755'
       loop:
         - /etc/dconf/db/local.d
+        - /etc/dconf/db/local.d/locks
         - /etc/polkit-1/localauthority/50-local.d
 
     - name: Deploy restricted update script
@@ -35,9 +42,11 @@
           Defaults timestamp_timeout=15
           Defaults passwd_tries=3
           Defaults logfile="/var/log/sudo.log"
-          %"domain admins@sarvika.com" ALL=(ALL:ALL) ALL
-          %"domain users@sarvika.com" ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
-          
+          # 1405200512 = domain admins@sarvika.com
+          %#1405200512 ALL=(ALL:ALL) ALL
+          # 1405200513 = domain users@sarvika.com
+          %#1405200513 ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
+
     - name: Configure background automatic security patching
       copy:
         dest: /etc/apt/apt.conf.d/20auto-upgrades
@@ -62,6 +71,7 @@
           [org/gnome/desktop/screensaver]
           lock-enabled=true
           lock-delay=uint32 300
+      notify: update dconf
 
     - name: Blacklist USB Mass Storage Modules
       copy:
@@ -88,3 +98,218 @@
           ResultAny=no
           ResultInactive=no
           ResultActive=no
+
+    - name: Deploy company wallpaper image
+      copy:
+        src: files/company-wallpaper.jpg
+        dest: /usr/share/backgrounds/company-wallpaper.jpg
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Ensure dconf user profile exists
+      copy:
+        dest: /etc/dconf/profile/user
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          user-db:user
+          system-db:local
+
+    - name: Set uniform desktop background for all users
+      copy:
+        dest: /etc/dconf/db/local.d/01-background
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          [org/gnome/desktop/background]
+          picture-uri='file:///usr/share/backgrounds/company-wallpaper.jpg'
+          picture-uri-dark='file:///usr/share/backgrounds/company-wallpaper.jpg'
+          picture-options='zoom'
+      notify: update dconf
+
+    - name: Lock background settings so users cannot change them
+      copy:
+        dest: /etc/dconf/db/local.d/locks/00-background-lock
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          /org/gnome/desktop/background/picture-uri
+          /org/gnome/desktop/background/picture-uri-dark
+      notify: update dconf
+
+    - name: Install standard fleet packages
+      apt:
+        name:
+          - git
+          - curl
+          - htop
+          - vim
+        state: present
+        update_cache: yes
+
+    - name: Install security hardening packages
+      apt:
+        name:
+          - fail2ban
+          - auditd
+          - apparmor
+          - apparmor-utils
+        state: present
+        update_cache: yes
+
+    - name: Configure fail2ban for SSH brute-force protection
+      copy:
+        dest: /etc/fail2ban/jail.local
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 5
+          bantime = 3600
+          findtime = 600
+
+    - name: Enable and start fail2ban
+      systemd:
+        name: fail2ban
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Enable and start auditd
+      systemd:
+        name: auditd
+        enabled: yes
+        state: started
+
+    - name: Deploy baseline auditd rules
+      copy:
+        dest: /etc/audit/rules.d/hardening.rules
+        mode: '0640'
+        owner: root
+        group: root
+        content: |
+          -w /etc/passwd -p wa -k identity
+          -w /etc/sudoers -p wa -k sudoers_change
+          -w /etc/sudoers.d/ -p wa -k sudoers_change
+          -w /var/log/auth.log -p wa -k auth_log
+          -a always,exit -F arch=b64 -S execve -k exec_log
+
+    - name: Reload auditd rules
+      command: augenrules --load
+      changed_when: false
+
+    - name: Ensure AppArmor is enforcing
+      command: aa-enforce /etc/apparmor.d/*
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure AppArmor service enabled and running
+      systemd:
+        name: apparmor
+        enabled: yes
+        state: started
+
+    - name: Apply sysctl hardening
+      copy:
+        dest: /etc/sysctl.d/99-hardening.conf
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          # Disable IP forwarding (not a router)
+          net.ipv4.ip_forward=0
+          net.ipv6.conf.all.forwarding=0
+
+          # Enable SYN cookies (SYN flood protection)
+          net.ipv4.tcp_syncookies=1
+
+          # Enable ASLR (full randomization)
+          kernel.randomize_va_space=2
+
+          # Ignore ICMP redirects
+          net.ipv4.conf.all.accept_redirects=0
+          net.ipv6.conf.all.accept_redirects=0
+          net.ipv4.conf.all.send_redirects=0
+
+          # Ignore source-routed packets
+          net.ipv4.conf.all.accept_source_route=0
+          net.ipv6.conf.all.accept_source_route=0
+
+          # Log martian packets
+          net.ipv4.conf.all.log_martians=1
+
+          # Disable core dumps for setuid programs
+          fs.suid_dumpable=0
+
+    - name: Reload sysctl settings
+      command: sysctl --system
+      changed_when: false
+
+    - name: Deploy legal login banner (pre-auth)
+      copy:
+        dest: /etc/issue.net
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          *******************************************************************
+          NOTICE: This system is the property of Sarvika. Unauthorized access
+          or use is prohibited and may be subject to legal action. All
+          activity may be monitored and recorded.
+          *******************************************************************
+
+    - name: Deploy legal login banner (local console)
+      copy:
+        dest: /etc/issue
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          *******************************************************************
+          NOTICE: This system is the property of Sarvika. Unauthorized access
+          or use is prohibited and may be subject to legal action. All
+          activity may be monitored and recorded.
+          *******************************************************************
+
+    - name: Ensure SSH presents the banner
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?Banner'
+        line: 'Banner /etc/issue.net'
+      notify: restart sshd
+
+    # --- Centralized logging / SIEM forwarding ---
+    # No SIEM currently deployed in the office. Uncomment and configure
+    # once a central log collector (e.g. rsyslog server, Wazuh, Graylog) is available.
+    #
+    # - name: Configure rsyslog to forward logs to central SIEM
+    #   copy:
+    #     dest: /etc/rsyslog.d/90-siem-forward.conf
+    #     mode: '0644'
+    #     owner: root
+    #     group: root
+    #     content: |
+    #       *.* @@siem.sarvika.com:514
+    #
+    # - name: Restart rsyslog
+    #   systemd:
+    #     name: rsyslog
+    #     state: restarted
+
+  handlers:
+    - name: restart sshd
+      systemd:
+        name: ssh
+        state: restarted
+
+    - name: update dconf
+      command: dconf update
