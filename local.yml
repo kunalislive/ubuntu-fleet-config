@@ -22,10 +22,10 @@
         state: stopped
         enabled: no
 
-    - name: Download Sarvika Technologies wallpaper from NAS
+    - name: Download Sarvika Technologies wallpaper from GitHub
       get_url:
-        url: http://172.26.3.101:8001/sarvika-technologies-bg.jpg 
-        dest: /usr/share/backgrounds/sarvika-technologies-bg.jpg
+        url: "https://raw.githubusercontent.com/kunalislive/ubuntu-fleet-config/refs/heads/main/sarvika-technologies-bg.jpg"
+        dest: "/usr/share/backgrounds/sarvika-technologies-bg.jpg"
         mode: '0644'
 
     - name: Configure dconf profile for system-wide settings
