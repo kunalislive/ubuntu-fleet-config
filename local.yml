@@ -148,6 +148,7 @@
           - curl
           - htop
           - vim
+          - openssh-server
         state: present
         update_cache: yes
 
