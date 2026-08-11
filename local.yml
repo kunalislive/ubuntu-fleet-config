@@ -303,8 +303,23 @@
           #!/bin/bash
           HOSTNAME=$(hostname)
           DATE=$(date +%Y-%m-%d)
-          # We write directly to the system log so it can be collected centrally
-          dpkg-query -W -f='SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Pkg=${binary:Package}, Ver=${Version}\n' | logger
+          
+          # 1. Log manually installed APT packages
+          apt-mark showmanual | while read -r pkg; do
+              # Fetch the version for the specific package
+              VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "Unknown")
+              echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=APT, Pkg=${pkg}, Ver=${VER}" | logger
+          done
+          
+          # 2. Log Snap applications (skipping the header row)
+          snap list | tail -n +2 | awk '{print $1, $2}' | while read -r pkg ver; do
+              echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=Snap, Pkg=${pkg}, Ver=${ver}" | logger
+          done
+
+          # 3. Log GUI Applications (.desktop files)
+          ls /usr/share/applications | grep '\.desktop$' | sed 's/\.desktop//g' | while read -r app; do
+              echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=GUI, Pkg=${app}, Ver=N/A" | logger
+          done
 
     - name: Schedule monthly software audit
       cron:
