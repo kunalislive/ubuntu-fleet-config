@@ -1,5 +1,0 @@
-    - name: Download Sarvika Technologies wallpaper from NAS
-      get_url:
-        url: http://172.26.3.101:8001/sarvika-technologies-bg.jpg 
-        dest: /usr/share/backgrounds/sarvika-technologies-bg.jpg
-        mode: '0644'
