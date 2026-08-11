@@ -1,0 +1,111 @@
+---
+- name: Sarvika Technologies Ubuntu Fleet Configuration
+  hosts: localhost
+  connection: local
+  become: yes
+
+  tasks:
+    - name: Install standard fleet packages
+      apt:
+        name:
+          - git
+          - curl
+          - htop
+          - vim
+          - openssh-server
+        state: present
+        update_cache: yes
+
+    - name: Disable automatic firmware update daemon (fwupd)
+      systemd:
+        name: fwupd
+        state: stopped
+        enabled: no
+
+    - name: Copy Sarvika Technologies wallpaper to local machines
+      copy:
+        src: /mnt/it-config/files/sarvika-technologies-bg.jpg 
+        dest: /usr/share/backgrounds/sarvika-technologies-bg.jpg
+        mode: '0644'
+
+    - name: Configure dconf profile for system-wide settings
+      copy:
+        dest: /etc/dconf/profile/user
+        content: |
+          user-db:user
+          system-db:local
+        mode: '0644'
+
+    - name: Set default GNOME wallpaper
+      copy:
+        dest: /etc/dconf/db/local.d/00-wallpaper
+        content: |
+          [org/gnome/desktop/background]
+          picture-uri='file:///usr/share/backgrounds/sarvika-technologies-bg.jpg'
+          picture-uri-dark='file:///usr/share/backgrounds/sarvika-technologies-bg.jpg'
+        mode: '0644'
+      register: dconf_wallpaper
+
+    - name: Update dconf database to apply wallpaper changes
+      command: dconf update
+      when: dconf_wallpaper.changed
+
+    - name: Deploy monthly software audit script
+      copy:
+        dest: /usr/local/bin/software-audit.sh
+        mode: '0755'
+        owner: root
+        group: root
+        content: |
+          #!/bin/bash
+          HOSTNAME=$(hostname)
+          DATE=$(date +%Y-%m-%d)
+          declare -A SEEN_PKGS
+          
+          for pkg in $(apt-mark showmanual); do
+              pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
+              if [[ -z "${SEEN_PKGS[$pkg_lower]}" ]]; then
+                  SEEN_PKGS[$pkg_lower]=1
+                  VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "Unknown")
+                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=APT, Pkg=${pkg}, Ver=${VER}" | logger
+              fi
+          done
+          
+          for pkg in $(snap list 2>/dev/null | awk 'NR>1 {print $1}'); do
+              pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
+              if [[ -z "${SEEN_PKGS[$pkg_lower]}" ]]; then
+                  SEEN_PKGS[$pkg_lower]=1
+                  VER=$(snap list "$pkg" | awk 'NR>1 {print $2}')
+                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=Snap, Pkg=${pkg}, Ver=${VER}" | logger
+              fi
+          done
+          
+          for app in $(ls /usr/share/applications 2>/dev/null | grep '\.desktop$' | sed 's/\.desktop//g'); do
+              app_lower=$(echo "$app" | tr '[:upper:]' '[:lower:]')
+              if [[ -z "${SEEN_PKGS[$app_lower]}" ]]; then
+                  SEEN_PKGS[$app_lower]=1
+                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=GUI, Pkg=${app}, Ver=N/A" | logger
+              fi
+          done
+
+    - name: Schedule monthly software audit
+      cron:
+        name: "Monthly Software Audit Execution"
+        minute: "0"
+        hour: "2"
+        day: "1"
+        job: "/usr/local/bin/software-audit.sh"
+
+    - name: Configure Rsyslog to forward audit logs
+      copy:
+        dest: /etc/rsyslog.d/99-software-audit-forward.conf
+        content: |
+          :msg, contains, "SoftwareAudit:" @192.168.1.100:514
+        mode: '0644'
+      notify: restart rsyslog
+
+  handlers:
+    - name: restart rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
