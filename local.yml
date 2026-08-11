@@ -1,146 +1,10 @@
 ---
-- name: Enforce Central Ubuntu Fleet Policy
+- name: Sarvika Technologies Ubuntu Fleet Configuration
   hosts: localhost
   connection: local
   become: yes
+
   tasks:
-
-    - name: Abort if not Ubuntu
-      fail:
-        msg: "This playbook is Ubuntu-only, refusing to run on {{ ansible_distribution }}"
-      when: ansible_distribution != "Ubuntu"
-
-    - name: Ensure required configuration directories exist
-      file:
-        path: "{{ item }}"
-        state: directory
-        owner: root
-        group: root
-        mode: '0755'
-      loop:
-        - /etc/dconf/db/local.d
-        - /etc/dconf/db/local.d/locks
-        - /etc/polkit-1/localauthority/50-local.d
-
-    - name: Deploy restricted update script
-      copy:
-        dest: /usr/local/bin/safe-update.sh
-        mode: '0755'
-        owner: root
-        group: root
-        content: |
-          #!/bin/bash
-          /usr/bin/apt update && /usr/bin/apt upgrade -y && /usr/bin/apt autoremove -y
-
-    - name: Deploy AD privilege control rules
-      copy:
-        dest: /etc/sudoers.d/ad-policy
-        mode: '0440'
-        owner: root
-        group: root
-        content: |
-          Defaults timestamp_timeout=15
-          Defaults passwd_tries=3
-          Defaults logfile="/var/log/sudo.log"
-          # 1405200512 = domain admins@sarvika.com
-          %#1405200512 ALL=(ALL:ALL) ALL
-          # 1405200513 = domain users@sarvika.com
-          %#1405200513 ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
-
-    - name: Configure background automatic security patching
-      copy:
-        dest: /etc/apt/apt.conf.d/20auto-upgrades
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          APT::Periodic::Update-Package-Lists "1";
-          APT::Periodic::Unattended-Upgrade "1";
-          APT::Periodic::AutocleanInterval "7";
-
-    - name: Lock GNOME desktop settings (Disable autorun, enforce screen lock)
-      copy:
-        dest: /etc/dconf/db/local.d/00-security-locks
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          [org/gnome/desktop/media-handling]
-          autorun-never=true
-
-          [org/gnome/desktop/screensaver]
-          lock-enabled=true
-          lock-delay=uint32 300
-      notify: update dconf
-
-    - name: Blacklist USB Mass Storage Modules
-      copy:
-        dest: /etc/modprobe.d/block-usb-storage.conf
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          blacklist usb_storage
-          blacklist uas
-          install usb_storage /bin/true
-          install uas /bin/true
-
-    - name: Disable Polkit Network Hotspot Modifications
-      copy:
-        dest: /etc/polkit-1/localauthority/50-local.d/10-disable-hotspot.pkla
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          [Disable Hotspot]
-          Identity=unix-group:domain users@sarvika.com
-          Action=org.freedesktop.NetworkManager.settings.modify.system
-          ResultAny=no
-          ResultInactive=no
-          ResultActive=no
-
-    - name: Deploy company wallpaper image
-      copy:
-        src: files/company-wallpaper.jpg
-        dest: /usr/share/backgrounds/company-wallpaper.jpg
-        mode: '0644'
-        owner: root
-        group: root
-
-    - name: Ensure dconf user profile exists
-      copy:
-        dest: /etc/dconf/profile/user
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          user-db:user
-          system-db:local
-
-    - name: Set uniform desktop background for all users
-      copy:
-        dest: /etc/dconf/db/local.d/01-background
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          [org/gnome/desktop/background]
-          picture-uri='file:///usr/share/backgrounds/company-wallpaper.jpg'
-          picture-uri-dark='file:///usr/share/backgrounds/company-wallpaper.jpg'
-          picture-options='zoom'
-      notify: update dconf
-
-    - name: Lock background settings so users cannot change them
-      copy:
-        dest: /etc/dconf/db/local.d/locks/00-background-lock
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          /org/gnome/desktop/background/picture-uri
-          /org/gnome/desktop/background/picture-uri-dark
-      notify: update dconf
-
     - name: Install standard fleet packages
       apt:
         name:
@@ -152,147 +16,39 @@
         state: present
         update_cache: yes
 
-    - name: Install security hardening packages
-      apt:
-        name:
-          - fail2ban
-          - auditd
-          - apparmor
-          - apparmor-utils
-        state: present
-        update_cache: yes
-
-    - name: Configure fail2ban for SSH brute-force protection
-      copy:
-        dest: /etc/fail2ban/jail.local
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          [sshd]
-          enabled = true
-          port = ssh
-          filter = sshd
-          logpath = /var/log/auth.log
-          maxretry = 10
-          bantime = 3600
-          findtime = 600
-
-    - name: Enable and start fail2ban
+    - name: Disable automatic firmware update daemon (fwupd)
       systemd:
-        name: fail2ban
-        enabled: yes
-        state: started
-        daemon_reload: yes
+        name: fwupd
+        state: stopped
+        enabled: no
 
-    - name: Enable and start auditd
-      systemd:
-        name: auditd
-        enabled: yes
-        state: started
-
-    - name: Deploy baseline auditd rules
-      copy:
-        dest: /etc/audit/rules.d/hardening.rules
-        mode: '0640'
-        owner: root
-        group: root
-        content: |
-          -w /etc/passwd -p wa -k identity
-          -w /etc/sudoers -p wa -k sudoers_change
-          -w /etc/sudoers.d/ -p wa -k sudoers_change
-          -w /var/log/auth.log -p wa -k auth_log
-          -a always,exit -F arch=b64 -S execve -k exec_log
-
-    - name: Reload auditd rules
-      command: augenrules --load
-      changed_when: false
-
-    - name: Ensure AppArmor is enforcing
-      command: aa-enforce /etc/apparmor.d/*
-      changed_when: false
-      failed_when: false
-
-    - name: Ensure AppArmor service enabled and running
-      systemd:
-        name: apparmor
-        enabled: yes
-        state: started
-
-    - name: Apply sysctl hardening
-      copy:
-        dest: /etc/sysctl.d/99-hardening.conf
+    - name: Download Sarvika Technologies wallpaper from NAS
+      get_url:
+        url: http://172.26.3.101:8001/sarvika-technologies-bg.jpg 
+        dest: /usr/share/backgrounds/sarvika-technologies-bg.jpg
         mode: '0644'
-        owner: root
-        group: root
-        content: |
-          # Disable IP forwarding (not a router)
-          net.ipv4.ip_forward=0
-          net.ipv6.conf.all.forwarding=0
 
-          # Enable SYN cookies (SYN flood protection)
-          net.ipv4.tcp_syncookies=1
-
-          # Enable ASLR (full randomization)
-          kernel.randomize_va_space=2
-
-          # Ignore ICMP redirects
-          net.ipv4.conf.all.accept_redirects=0
-          net.ipv6.conf.all.accept_redirects=0
-          net.ipv4.conf.all.send_redirects=0
-
-          # Ignore source-routed packets
-          net.ipv4.conf.all.accept_source_route=0
-          net.ipv6.conf.all.accept_source_route=0
-
-          # Log martian packets
-          net.ipv4.conf.all.log_martians=1
-
-          # Disable core dumps for setuid programs
-          fs.suid_dumpable=0
-
-    - name: Reload sysctl settings
-      command: sysctl --system
-      changed_when: false
-
-    - name: Deploy legal login banner (pre-auth)
+    - name: Configure dconf profile for system-wide settings
       copy:
-        dest: /etc/issue.net
-        mode: '0644'
-        owner: root
-        group: root
+        dest: /etc/dconf/profile/user
         content: |
-          *******************************************************************
-          NOTICE: This system is the property of Sarvika. Unauthorized access
-          or use is prohibited and may be subject to legal action. All
-          activity may be monitored and recorded.
-          *******************************************************************
+          user-db:user
+          system-db:local
+        mode: '0644'
 
-    - name: Deploy legal login banner (local console)
+    - name: Set default GNOME wallpaper
       copy:
-        dest: /etc/issue
-        mode: '0644'
-        owner: root
-        group: root
+        dest: /etc/dconf/db/local.d/00-wallpaper
         content: |
-          *******************************************************************
-          NOTICE: This system is the property of Sarvika. Unauthorized access
-          or use is prohibited and may be subject to legal action. All
-          activity may be monitored and recorded.
-          *******************************************************************
+          [org/gnome/desktop/background]
+          picture-uri='file:///usr/share/backgrounds/sarvika-technologies-bg.jpg'
+          picture-uri-dark='file:///usr/share/backgrounds/sarvika-technologies-bg.jpg'
+        mode: '0644'
+      register: dconf_wallpaper
 
-    - name: Check if sshd_config exists
-      stat:
-        path: /etc/ssh/sshd_config
-      register: sshd_config_check
-
-    - name: Ensure SSH presents the banner
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?Banner'
-        line: 'Banner /etc/issue.net'
-      when: sshd_config_check.stat.exists
-      notify: restart sshd
+    - name: Update dconf database to apply wallpaper changes
+      command: dconf update
+      when: dconf_wallpaper.changed
 
     - name: Deploy monthly software audit script
       copy:
@@ -304,35 +60,33 @@
           #!/bin/bash
           HOSTNAME=$(hostname)
           DATE=$(date +%Y-%m-%d)
-          
-          # Create a memory array to track duplicates
           declare -A SEEN_PKGS
           
-          # 1. Log manually installed APT packages
-          while read -r pkg; do
-              if [[ -z "${SEEN_PKGS[$pkg]}" ]]; then
-                  SEEN_PKGS[$pkg]=1
+          for pkg in $(apt-mark showmanual); do
+              pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
+              if [[ -z "${SEEN_PKGS[$pkg_lower]}" ]]; then
+                  SEEN_PKGS[$pkg_lower]=1
                   VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "Unknown")
                   echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=APT, Pkg=${pkg}, Ver=${VER}" | logger
               fi
-          done < <(apt-mark showmanual)
+          done
           
-          # 2. Log Snap applications
-          while read -r pkg ver; do
-              if [[ -z "${SEEN_PKGS[$pkg]}" ]]; then
-                  SEEN_PKGS[$pkg]=1
-                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=Snap, Pkg=${pkg}, Ver=${ver}" | logger
+          for pkg in $(snap list 2>/dev/null | awk 'NR>1 {print $1}'); do
+              pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
+              if [[ -z "${SEEN_PKGS[$pkg_lower]}" ]]; then
+                  SEEN_PKGS[$pkg_lower]=1
+                  VER=$(snap list "$pkg" | awk 'NR>1 {print $2}')
+                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=Snap, Pkg=${pkg}, Ver=${VER}" | logger
               fi
-          done < <(snap list 2>/dev/null | tail -n +2 | awk '{print $1, $2}')
-
-          # 3. Log GUI Applications (.desktop files)
-          while read -r app; do
-              if [[ -z "${SEEN_PKGS[$app]}" ]]; then
-                  SEEN_PKGS[$app]=1
+          done
+          
+          for app in $(ls /usr/share/applications 2>/dev/null | grep '\.desktop$' | sed 's/\.desktop//g'); do
+              app_lower=$(echo "$app" | tr '[:upper:]' '[:lower:]')
+              if [[ -z "${SEEN_PKGS[$app_lower]}" ]]; then
+                  SEEN_PKGS[$app_lower]=1
                   echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=GUI, Pkg=${app}, Ver=N/A" | logger
               fi
-          done < <(ls /usr/share/applications 2>/dev/null | grep '\.desktop$' | sed 's/\.desktop//g')
-
+          done
 
     - name: Schedule monthly software audit
       cron:
@@ -342,31 +96,16 @@
         day: "1"
         job: "/usr/local/bin/software-audit.sh"
 
-
-
-    # --- Centralized logging / SIEM forwarding ---
-    # No SIEM currently deployed in the office. Uncomment and configure
-    # once a central log collector (e.g. rsyslog server, Wazuh, Graylog) is available.
-    #
-    # - name: Configure rsyslog to forward logs to central SIEM
-    #   copy:
-    #     dest: /etc/rsyslog.d/90-siem-forward.conf
-    #     mode: '0644'
-    #     owner: root
-    #     group: root
-    #     content: |
-    #       *.* @@siem.sarvika.com:514
-    #
-    # - name: Restart rsyslog
-    #   systemd:
-    #     name: rsyslog
-    #     state: restarted
+    - name: Configure Rsyslog to forward audit logs
+      copy:
+        dest: /etc/rsyslog.d/99-software-audit-forward.conf
+        content: |
+          :msg, contains, "SoftwareAudit:" @192.168.1.100:514
+        mode: '0644'
+      notify: restart rsyslog
 
   handlers:
-    - name: restart sshd
+    - name: restart rsyslog
       systemd:
-        name: ssh
+        name: rsyslog
         state: restarted
-
-    - name: update dconf
-      command: dconf update
