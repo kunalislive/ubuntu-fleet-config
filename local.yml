@@ -293,6 +293,28 @@
       when: sshd_config_check.stat.exists
       notify: restart sshd
 
+    - name: Deploy monthly software audit script
+      copy:
+        dest: /usr/local/bin/software-audit.sh
+        mode: '0755'
+        owner: root
+        group: root
+        content: |
+          #!/bin/bash
+          HOSTNAME=$(hostname)
+          DATE=$(date +%Y-%m-%d)
+          # We write directly to the system log so it can be collected centrally
+          dpkg-query -W -f='SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Pkg=${binary:Package}, Ver=${Version}\n' | logger
+
+    - name: Schedule monthly software audit
+      cron:
+        name: "Monthly Software Audit Execution"
+        minute: "0"
+        hour: "2"
+        day: "1"
+        job: "/usr/local/bin/software-audit.sh"
+
+
 
     # --- Centralized logging / SIEM forwarding ---
     # No SIEM currently deployed in the office. Uncomment and configure
