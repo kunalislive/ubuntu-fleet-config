@@ -304,22 +304,34 @@
           HOSTNAME=$(hostname)
           DATE=$(date +%Y-%m-%d)
           
-          # 1. Log manually installed APT packages
-          apt-mark showmanual | while read -r pkg; do
-              # Fetch the version for the specific package
-              VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "Unknown")
-              echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=APT, Pkg=${pkg}, Ver=${VER}" | logger
-          done
+          # Create a memory array to track duplicates
+          declare -A SEEN_PKGS
           
-          # 2. Log Snap applications (skipping the header row)
-          snap list | tail -n +2 | awk '{print $1, $2}' | while read -r pkg ver; do
-              echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=Snap, Pkg=${pkg}, Ver=${ver}" | logger
-          done
+          # 1. Log manually installed APT packages
+          while read -r pkg; do
+              if [[ -z "${SEEN_PKGS[$pkg]}" ]]; then
+                  SEEN_PKGS[$pkg]=1
+                  VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "Unknown")
+                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=APT, Pkg=${pkg}, Ver=${VER}" | logger
+              fi
+          done < <(apt-mark showmanual)
+          
+          # 2. Log Snap applications
+          while read -r pkg ver; do
+              if [[ -z "${SEEN_PKGS[$pkg]}" ]]; then
+                  SEEN_PKGS[$pkg]=1
+                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=Snap, Pkg=${pkg}, Ver=${ver}" | logger
+              fi
+          done < <(snap list 2>/dev/null | tail -n +2 | awk '{print $1, $2}')
 
           # 3. Log GUI Applications (.desktop files)
-          ls /usr/share/applications | grep '\.desktop$' | sed 's/\.desktop//g' | while read -r app; do
-              echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=GUI, Pkg=${app}, Ver=N/A" | logger
-          done
+          while read -r app; do
+              if [[ -z "${SEEN_PKGS[$app]}" ]]; then
+                  SEEN_PKGS[$app]=1
+                  echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=GUI, Pkg=${app}, Ver=N/A" | logger
+              fi
+          done < <(ls /usr/share/applications 2>/dev/null | grep '\.desktop$' | sed 's/\.desktop//g')
+
 
     - name: Schedule monthly software audit
       cron:
