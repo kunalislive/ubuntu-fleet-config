@@ -146,11 +146,10 @@ Onboarding Complete! This laptop is now managed centrally
 
 ### Method B — Direct from GitHub (Remote / No NAS)
 
-> Use this method when the laptop cannot reach the NAS (e.g. remote worker, new office, home setup).
+> Use this method when the laptop cannot reach the NAS (e.g. remote worker, home setup).
 
 ```bash
 curl -sfkL https://raw.githubusercontent.com/kunalislive/ubuntu-fleet-config/main/bootstrap.sh -o bootstrap.sh
-cat bootstrap.sh        # ← Always review before running
 sudo bash bootstrap.sh
 ```
 
@@ -352,7 +351,6 @@ This means any change pushed to `local.yml` in this repository will automaticall
 
 ## Known Issues / TODO
 
-- [ ] The wallpaper download URL in `local.yml` points to the GitHub HTML page rather than the raw file — update to `raw.githubusercontent.com` URL.
 - [ ] SIEM forwarding (`siem.sarvika.com:514`) is commented out — enable once SIEM infrastructure is in place.
 - [ ] Software audit log aggregator IP (`192.168.1.100:514`) is hardcoded — consider making it a variable.
 - [ ] No idempotency guard on `aa-enforce` — minor harmless warning on every run.
