@@ -127,7 +127,7 @@
 
     # --- Wallpaper ---
 
-    - name: Download Sarvika Technologies wallpaper from GitHub
+    - name: Setting Sarvika Technologies wallpaper
       get_url:
         url: "https://github.com/kunalislive/ubuntu-fleet-config/blob/main/files/company-wallpaper.jpg"
         dest: "/usr/share/backgrounds/company-wallapaper.jpg"
