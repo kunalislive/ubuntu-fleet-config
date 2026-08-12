@@ -17,4 +17,4 @@ if [ ! -s /tmp/local.yml ]; then
 fi
 
 ansible-playbook /tmp/local.yml
-echo "Onboarding Complete! This laptop is now managed centrally via GitHub."
+echo "Onboarding Complete! This laptop is now managed centrally"
