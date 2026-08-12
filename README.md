@@ -1,4 +1,4 @@
-# Sarvika Technologies — Ubuntu Fleet Management 🚀
+# Sarvika Technologies — Ubuntu Fleet Management 
 
 > **Ansible-based GitOps fleet management** — a single-command solution to enroll, harden, and centrally manage Ubuntu laptops/desktops across the organisation.
 
@@ -57,19 +57,19 @@ Pushing a change to GitHub is all it takes to update every managed machine in th
 │                    SARVIKA IT INFRASTRUCTURE                     │
 │                                                                  │
 │  ┌───────────────────┐         ┌──────────────────────────────┐  │
-│  │   Synology NAS    │         │      GitHub Repository        │  │
+│  │   Synology NAS    │         │      GitHub Repository       │  │
 │  │   172.26.3.101    │         │   ubuntu-fleet-config        │  │
 │  │                   │         │                              │  │
 │  │   bootstrap.sh ───┼─ pulls ►│   local.yml  (playbook)      │  │
 │  │   (day-1 only)    │         │   files/company-wallpaper.jpg│  │
 │  └───────────────────┘         └──────────────┬───────────────┘  │
-│                                               │ nightly at 02:00  │
-│                                               ▼                   │
+│                                               │ nightly at 02:00 │
+│                                               ▼                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │                  Managed Ubuntu Laptops                    │  │
 │  │                                                            │  │
 │  │  /etc/cron.d/ansible-fleet-pull   (auto-installed)         │  │
-│  │  → curl raw.githubusercontent.com → ansible-playbook      │  │
+│  │  → curl raw.githubusercontent.com → ansible-playbook       │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
 ```
