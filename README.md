@@ -10,8 +10,8 @@
 - [Architecture Blueprint](#architecture-blueprint)
 - [How It Works](#how-it-works)
 - [How to Enroll a New Laptop](#how-to-enroll-a-new-laptop)
-  - [Method A — Via Synology NAS (Standard)](#method-a--via-synology-nas-standard)
-  - [Method B — Direct from GitHub (Remote / No NAS)](#method-b--direct-from-github-remote--no-nas)
+  - [Method A — On-Premise / VPN (Standard)](#method-a--on-premise--vpn-standard)
+  - [Method B — Work From Home (VPN First)](#method-b--work-from-home-vpn-first)
 - [File Structure](#file-structure)
 - [What the Playbook Does](#what-the-playbook-does)
   - [1. Pre-flight Check](#1-pre-flight-check)
@@ -42,9 +42,10 @@
 
 This repository manages the **automated, zero-touch configuration** for the Sarvika Technologies Ubuntu fleet. It uses a **Hybrid GitOps Architecture**:
 
-- **The Local Anchor (Synology NAS)** — hosts `bootstrap.sh` at `//172.26.3.101/softwares/ansible/` for secure day-1 enrollment on the internal network.
+- **The Local Anchor (Synology NAS)** — hosts `bootstrap.sh` at `smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/` for secure day-1 enrollment on the internal network.
 - **The Brain (GitHub)** — hosts `local.yml` (the Ansible playbook) and all corporate assets (wallpaper, policies).
 - **The Execution (Endpoints)** — each enrolled laptop runs a silent cron job at **2:00 AM daily** to pull the latest configuration from GitHub and apply it automatically.
+- **VPN (Exception)** — for the few employees working remotely, connecting to the Sarvika VPN makes the NAS reachable from home, using the same enrollment process as the office.
 
 Pushing a change to GitHub is all it takes to update every managed machine in the fleet within 24 hours — no manual SSH or physical access required.
 
@@ -53,25 +54,22 @@ Pushing a change to GitHub is all it takes to update every managed machine in th
 ## Architecture Blueprint
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    SARVIKA IT INFRASTRUCTURE                     │
-│                                                                  │
-│  ┌───────────────────┐         ┌──────────────────────────────┐  │
-│  │   Synology NAS    │         │      GitHub Repository       │  │
-│  │   172.26.3.101    │         │   ubuntu-fleet-config        │  │
-│  │                   │         │                              │  │
-│  │   bootstrap.sh ───┼─ pulls ►│   local.yml  (playbook)      │  │
-│  │   (day-1 only)    │         │   files/company-wallpaper.jpg│  │
-│  └───────────────────┘         └──────────────┬───────────────┘  │
-│                                               │ nightly at 02:00 │
-│                                               ▼                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │                  Managed Ubuntu Laptops                    │  │
-│  │                                                            │  │
-│  │  /etc/cron.d/ansible-fleet-pull   (auto-installed)         │  │
-│  │  → curl raw.githubusercontent.com → ansible-playbook       │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                     SARVIKA IT INFRASTRUCTURE                        │
+│                                                                      │
+│  ┌─────────────────────┐          ┌──────────────────────────────┐   │
+│  │    Synology NAS     │          │      GitHub Repository       │   │
+│  │    172.26.3.101     │          │   ubuntu-fleet-config        │   │
+│  │                     │          │                              │   │
+│  │  bootstrap.sh       │          │   local.yml  (playbook)      │   │
+│  │  (day-1 only)       │          │   files/company-wallpaper.jpg│   │
+│  └──────────┬──────────┘          └──────────────┬───────────────┘   │
+│             │ (office - standard)           │ nightly at 02:00       │
+│             │ (VPN - exception, few WFH)    ▼                        │
+│             └─────────────────────► Managed Ubuntu Laptops           │
+│                                   /etc/cron.d/ansible-fleet-pull     │
+│                                   → curl github → ansible-playbook   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -105,10 +103,11 @@ New Ubuntu Machine
 
 ## How to Enroll a New Laptop
 
-### Method A — Via Synology NAS (Standard)
+>  **Policy:** `bootstrap.sh` is hosted exclusively on the internal Synology NAS and is **never distributed publicly**. All enrollments must go through the NAS — either from the office (standard) or over VPN (exception for a few WFH users).
 
-> Use this method when the laptop is on the **internal corporate network or VPN**.  
-> The NAS (`172.26.3.101`) is not reachable from public networks.
+### Method A — On-Premise (Standard — Most Users)
+
+> Use this method when the laptop is **physically in the office**. This is the default enrollment path for the vast majority of Sarvika employees.
 
 **Step 1 — Mount the NAS and download the bootstrap script (run as the standard user):**
 
@@ -144,14 +143,46 @@ When complete, you will see:
 Onboarding Complete! This laptop is now managed centrally
 ```
 
-### Method B — Direct from GitHub (Remote / No NAS)
+### Method B — Work From Home (VPN First)
 
-> Use this method when the laptop cannot reach the NAS (e.g. remote worker, home setup).
+> Use this method when the employee **cannot be physically present** in the office. The VPN must be set up **before** running the bootstrap — this makes the NAS reachable from home exactly as if on-premise.
+
+**Step 0 — Resolve the chicken-and-egg (new machine with no VPN yet):**
+
+IT must deliver VPN credentials and the VPN client to the employee via one of:
+- Email the VPN config file + VPN client installer (e.g. OpenVPN / WireGuard)
+- Ship a pre-configured USB drive with the VPN client and config
+- IT admin remotes in via AnyDesk/TeamViewer to install VPN first
+
+**Step 1 — Employee connects to Sarvika VPN:**
 
 ```bash
-curl -sfkL https://raw.githubusercontent.com/kunalislive/ubuntu-fleet-config/main/bootstrap.sh -o bootstrap.sh
-sudo bash bootstrap.sh
+# Example for WireGuard
+sudo wg-quick up /path/to/sarvika.conf
+
+# Example for OpenVPN
+sudo openvpn --config /path/to/sarvika.ovpn
 ```
+
+Verify NAS is reachable before proceeding:
+
+```bash
+ping -c 2 172.26.3.101
+```
+
+**Step 2 — IT admin (SSH) runs Method A steps:**
+
+Once VPN is up, the NAS is reachable and **Method A applies exactly** — the IT admin mounts the NAS, downloads `bootstrap.sh`, and executes it. The employee does not handle the script.
+
+```bash
+gio mount smb://172.26.3.101/softwares
+gio copy smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/bootstrap.sh ~/Downloads/bootstrap.sh
+gio mount -u smb://172.26.3.101/softwares
+su - stpl
+sudo bash /home/USERNAME/Downloads/bootstrap.sh
+```
+
+>⚠️  **Security Note:** The bootstrap script is sourced **only** from the internal NAS in both methods. It is never downloaded from a public URL, ensuring no tampered or unofficial version can be run.
 
 ---
 
