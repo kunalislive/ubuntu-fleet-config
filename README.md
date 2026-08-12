@@ -114,7 +114,7 @@ New Ubuntu Machine
 
 ```bash
 gio mount smb://172.26.3.101/softwares
-gio copy smb://172.26.3.101/softwares/ansible/bootstrap.sh ~/Downloads/bootstrap.sh
+gio copy smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/bootstrap.sh ~/Downloads/bootstrap.sh
 gio mount -u smb://172.26.3.101/softwares
 ```
 
