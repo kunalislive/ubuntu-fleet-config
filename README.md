@@ -1,74 +1,57 @@
-# Sarvika Technologies — Ubuntu Fleet Management 
+# Sarvika Technologies — Ubuntu Fleet Management
 
-> **Ansible-based GitOps fleet management** — a single-command solution to enroll, harden, and centrally manage Ubuntu laptops/desktops across the organisation.
+> **Ansible-based fleet management** — a single-command solution to enroll, harden, and centrally manage Ubuntu laptops across the organisation.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Architecture Blueprint](#architecture-blueprint)
+- [Architecture](#architecture)
 - [How It Works](#how-it-works)
 - [How to Enroll a New Laptop](#how-to-enroll-a-new-laptop)
-  - [Method A — On-Premise / VPN (Standard)](#method-a--on-premise--vpn-standard)
-  - [Method B — Work From Home (VPN First)](#method-b--work-from-home-vpn-first)
+- [Recycling / Re-assigning a Laptop](#recycling--re-assigning-a-laptop)
 - [File Structure](#file-structure)
 - [What the Playbook Does](#what-the-playbook-does)
-  - [1. Pre-flight Check](#1-pre-flight-check)
-  - [2. Base Packages](#2-base-packages)
-  - [3. AD Privilege Control (sudoers)](#3-ad-privilege-control-sudoers)
-  - [4. Automatic Security Patching](#4-automatic-security-patching)
-  - [5. Desktop Lockdown](#5-desktop-lockdown)
-  - [6. Corporate Wallpaper](#6-corporate-wallpaper)
-  - [7. Security Hardening](#7-security-hardening)
-  - [8. Legal Login Banners](#8-legal-login-banners)
-  - [9. Software Audit](#9-software-audit)
-  - [10. Centralized Logging / SIEM (Future)](#10-centralized-logging--siem-future)
-- [Requirements](#requirements)
 - [Operations Cheat Sheet](#operations-cheat-sheet)
-  - [Force an Immediate Update](#force-an-immediate-update)
-  - [Disable a Specific Policy](#disable-a-specific-policy)
-  - [Update the Corporate Wallpaper](#update-the-corporate-wallpaper)
-  - [Check Ansible Cron Job Status](#check-ansible-cron-job-status)
-  - [Manually Verify a Machine is Enrolled](#manually-verify-a-machine-is-enrolled)
-- [Scheduled Pull (Auto-Update)](#scheduled-pull-auto-update)
 - [Logs](#logs)
-- [Troubleshooting & Known Issues](#troubleshooting--known-issues)
-- [TODO / Roadmap](#todo--roadmap)
+- [Known Issues / TODO](#known-issues--todo)
 
 ---
 
 ## Overview
 
-This repository manages the **automated, zero-touch configuration** for the Sarvika Technologies Ubuntu fleet. It uses a **Hybrid GitOps Architecture**:
+This repository manages the **automated, zero-touch configuration** for the Sarvika Technologies Ubuntu fleet. It uses a **NAS-Primary, GitHub-Fallback** architecture:
 
-- **The Local Anchor (Synology NAS)** — hosts `bootstrap.sh` at `smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/` for secure day-1 enrollment on the internal network.
-- **The Brain (GitHub)** — hosts `local.yml` (the Ansible playbook) and all corporate assets (wallpaper, policies).
-- **The Execution (Endpoints)** — each enrolled laptop runs a silent cron job at **2:00 AM daily** to pull the latest configuration from GitHub and apply it automatically.
-- **VPN (Exception)** — for the few employees working remotely, connecting to the Sarvika VPN makes the NAS reachable from home, using the same enrollment process as the office.
+- **Primary Source (Synology NAS)** — hosts `enroll.sh` and `local.yml` at:
+  `smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/`
+- **Fallback (GitHub)** — if the NAS is unreachable, machines automatically fall back to pulling `local.yml` from this GitHub repository.
+- **Endpoints** — each enrolled laptop runs `/usr/local/bin/fleet-sync.sh` nightly at **2:00 AM** via cron. It tries the NAS first, falls back to GitHub, and runs the Ansible playbook automatically.
 
-Pushing a change to GitHub is all it takes to update every managed machine in the fleet within 24 hours — no manual SSH or physical access required.
+Updating `local.yml` on the NAS is **all it takes** to push a policy change to all 90+ laptops within 24 hours.
 
 ---
 
-## Architecture Blueprint
+## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                     SARVIKA IT INFRASTRUCTURE                        │
 │                                                                      │
 │  ┌─────────────────────┐          ┌──────────────────────────────┐   │
-│  │    Synology NAS     │          │      GitHub Repository       │   │
-│  │    172.26.3.101     │          │   ubuntu-fleet-config        │   │
+│  │    Synology NAS     │          │  GitHub (Fallback only)      │   │
+│  │    172.26.3.101     │          │  ubuntu-fleet-config         │   │
 │  │                     │          │                              │   │
-│  │  bootstrap.sh       │          │   local.yml  (playbook)      │   │
-│  │  (day-1 only)       │          │   files/company-wallpaper.jpg│   │
-│  └──────────┬──────────┘          └──────────────┬───────────────┘   │
-│             │ (office - standard)           │ nightly at 02:00       │
-│             │ (VPN - exception, few WFH)    ▼                        │
-│             └─────────────────────► Managed Ubuntu Laptops           │
-│                                   /etc/cron.d/ansible-fleet-pull     │
-│                                   → curl github → ansible-playbook   │
+│  │  enroll.sh  ◄───────┤─primary  │  local.yml (if NAS down)     │   │
+│  │  local.yml (primary)│ fallback►│                              │   │
+│  └──────────┬──────────┘          └──────────────────────────────┘   │
+│             │                                                        │
+│             ▼ (office — standard or VPN for WFH)                     │
+│                              Managed Ubuntu Laptops                  │
+│                              fleet-sync.sh (nightly 02:00)           │
+│                              1. Try NAS for local.yml                │
+│                              2. Fallback to GitHub if NAS down       │
+│                              3. ansible-playbook local.yml           │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,11 +63,17 @@ Pushing a change to GitHub is all it takes to update every managed machine in th
 New Ubuntu Machine
       │
       ▼
- bootstrap.sh          ← Run once (as root) on day-1
+ enroll.sh              ← Run ONCE as root (stpl account) on Day 1
       │
-      ├─ Installs Ansible (via official PPA)
-      ├─ Writes /etc/cron.d/ansible-fleet-pull (daily 02:00 sync)
-      └─ Downloads & runs local.yml immediately (first-time config)
+      ├─ Installs dependencies (Ansible, cifs-utils, smbclient)
+      ├─ Asks for NAS credentials (firstname.lastname@sarvika.com) — 3 attempts
+      ├─ Verifies NAS mount is successful before proceeding
+      ├─ Downloads local.yml from NAS (or GitHub fallback)
+      ├─ Runs ansible-playbook local.yml (applies all fleet policies)
+      ├─ Installs nightly cron job (/etc/cron.d/ansible-fleet-pull)
+      ├─ Saves NAS credentials to /etc/samba/nas-credentials (for nightly sync)
+      ├─ Creates /etc/dconf/profile/stpl (exempts stpl from all locks)
+      └─ Deletes itself from /tmp automatically on exit
              │
              ▼
          local.yml      ← Ansible playbook (idempotent, runs nightly)
@@ -96,93 +85,122 @@ New Ubuntu Machine
              ├─ Locks down GNOME desktop (USB, autorun, screen lock, wallpaper)
              ├─ Hardens kernel & network (sysctl, AppArmor, auditd, fail2ban)
              ├─ Deploys legal login banners (SSH + console)
-             └─ Schedules monthly software audit → syslog → log aggregator
+             └─ Schedules monthly software audit → syslog
 ```
 
 ---
 
 ## How to Enroll a New Laptop
 
->  **Policy:** `bootstrap.sh` is hosted exclusively on the internal Synology NAS and is **never distributed publicly**. All enrollments must go through the NAS — either from the office (standard) or over VPN (exception for a few WFH users).
+> ⚠️ **Policy:** `enroll.sh` is hosted exclusively on the internal Synology NAS and is **never distributed publicly**. All enrollments must go through the NAS.
 
-### Method A — On-Premise (Standard — Most Users)
+### Step 1 — Download `enroll.sh` from the NAS
 
-> Use this method when the laptop is **physically in the office**. This is the default enrollment path for the vast majority of Sarvika employees.
-
-**Step 1 — Mount the NAS and download the bootstrap script (run as the standard user):**
+Log in to the laptop using your **Active Directory account** (e.g. `kunal.ranjan@sarvika.com`). Open the terminal and run:
 
 ```bash
-gio mount smb://172.26.3.101/softwares
-gio copy smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/bootstrap.sh ~/Downloads/bootstrap.sh
-gio mount -u smb://172.26.3.101/softwares
+smbclient //172.26.3.101/softwares -U kunal.ranjan -W sarvika.com \
+  -c "get ansible/ubuntu-fleet-config-main/enroll.sh /tmp/enroll.sh"
 ```
 
-**Step 2 — Switch to the local IT Admin account (`stpl`):**
+*(Enter your AD password when prompted. The file will be saved to `/tmp/enroll.sh`.)*
+
+### Step 2 — Switch to the local IT Admin account
 
 ```bash
 su - stpl
 ```
 
-**Step 3 — Execute the bootstrap:**
+*(Enter the stpl account password. Your terminal will switch to `stpl@...`.)*
+
+### Step 3 — Run the enrollment script
 
 ```bash
-sudo bash /home/USERNAME/Downloads/bootstrap.sh
+sudo bash /tmp/enroll.sh
 ```
 
-> Replace `USERNAME` with the standard user's actual home folder name.
-
-The laptop will automatically:
-1. Install Ansible from the official PPA
-2. Create the nightly cron job at `/etc/cron.d/ansible-fleet-pull`
-3. Download `local.yml` from GitHub
-4. Apply all Sarvika security policies immediately
+The script will now:
+1. Install all required dependencies automatically.
+2. Ask for your **NAS credentials** (in this exact format):
+   ```
+   Authentication Required (Attempt 1/3)
+   Enter user and password for share "softwares" on "172.26.3.101":
+   User [firstname.lastname@sarvika.com]: kunal.ranjan
+   Domain [WORKGROUP]: sarvika.com
+   Password:
+   ```
+   > 💡 **Important:** Enter **only your short username** (e.g. `kunal.ranjan`), NOT `kunal.ranjan@sarvika.com`. The `@sarvika.com` part must go in the Domain field.
+3. Test the mount immediately — if credentials are wrong, it retries up to **3 times**, then cancels.
+4. Download and apply all fleet policies via Ansible.
+5. Install the nightly auto-update cron job.
+6. Delete itself from `/tmp` automatically when done.
 
 When complete, you will see:
-
 ```
-Onboarding Complete! This laptop is now managed centrally
+╔══════════════════════════════════════════════════════════╗
+║    Enrollment Complete! Laptop is now managed.           ║
+║     Nightly sync: every day at 02:00                     ║
+╚══════════════════════════════════════════════════════════╝
 ```
 
-### Method B — Work From Home (VPN First)
+### Step 4 — Test the enrollment
 
-> Use this method when the employee **cannot be physically present** in the office. The VPN must be set up **before** running the bootstrap — this makes the NAS reachable from home exactly as if on-premise.
+Reboot the laptop, then log in as a regular domain user and verify:
 
-**Step 0 — Resolve the chicken-and-egg (new machine with no VPN yet):**
+| Test | Expected Result |
+|---|---|
+| Right-click desktop → change wallpaper | ❌ Option is greyed out / locked |
+| `sudo apt install vlc` | ❌ Blocked — "not in sudoers file" |
+| `sudo /usr/local/bin/safe-update.sh` | ✅ Runs without password (updates the laptop) |
+| `id` shows group `1405200512` | ✅ Domain Admin — has full sudo |
+| `id` shows only group `1405200513` | ✅ Domain User — restricted correctly |
 
-IT must deliver VPN credentials and the VPN client to the employee via one of:
-- Email the VPN config file + VPN client installer (e.g. OpenVPN / WireGuard)
-- Ship a pre-configured USB drive with the VPN client and config
-- IT admin remotes in via AnyDesk/TeamViewer to install VPN first
+---
 
-**Step 1 — Employee connects to Sarvika VPN:**
+## Recycling / Re-assigning a Laptop
+
+When an employee leaves and you want to give their laptop to someone new:
+
+### Step 1 — Remove the old user from the laptop
+
+Log into `stpl` on the laptop and run:
 
 ```bash
-# Example for WireGuard
-sudo wg-quick up /path/to/sarvika.conf
+# Remove a single specific user
+sudo userdel -r old.employee@sarvika.com
 
-# Example for OpenVPN
-sudo openvpn --config /path/to/sarvika.ovpn
+# OR remove ALL domain users at once (keeps stpl safe)
+for dir in /home/*; do
+    user=$(basename "$dir")
+    if [ "$user" != "stpl" ]; then
+        echo "Removing: $user"
+        sudo userdel -r "$user" 2>/dev/null || true
+    fi
+done
 ```
 
-Verify NAS is reachable before proceeding:
+> ✅ **Safe:** This only removes the user's **local files** from this laptop. Their Active Directory account on the Windows Server is completely untouched.
+
+### Step 2 — Clear from login screen history
 
 ```bash
-ping -c 2 172.26.3.101
+USERNAME="old.employee"
+sudo rm -f /var/lib/AccountsService/users/${USERNAME}
+sudo rm -f "/var/lib/AccountsService/users/${USERNAME}@sarvika.com"
+sudo rm -f /var/cache/gdm/${USERNAME}
+sudo rm -rf "/var/cache/gdm/${USERNAME}@sarvika.com"
+sudo systemctl restart gdm3
 ```
 
-**Step 2 — IT admin (SSH) runs Method A steps:**
+### Step 3 — Re-enroll (optional but recommended)
 
-Once VPN is up, the NAS is reachable and **Method A applies exactly** — the IT admin mounts the NAS, downloads `bootstrap.sh`, and executes it. The employee does not handle the script.
+Run the enrollment script again to ensure all policies are fully up to date:
 
 ```bash
-gio mount smb://172.26.3.101/softwares
-gio copy smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/bootstrap.sh ~/Downloads/bootstrap.sh
-gio mount -u smb://172.26.3.101/softwares
-su - stpl
-sudo bash /home/USERNAME/Downloads/bootstrap.sh
+smbclient //172.26.3.101/softwares -U kunal.ranjan -W sarvika.com \
+  -c "get ansible/ubuntu-fleet-config-main/enroll.sh /tmp/enroll.sh"
+sudo bash /tmp/enroll.sh
 ```
-
->⚠️  **Security Note:** The bootstrap script is sourced **only** from the internal NAS in both methods. It is never downloaded from a public URL, ensuring no tampered or unofficial version can be run.
 
 ---
 
@@ -190,11 +208,20 @@ sudo bash /home/USERNAME/Downloads/bootstrap.sh
 
 ```
 ubuntu-fleet-config/
-├── bootstrap.sh                # One-time onboarding script — installs Ansible & schedules cron
-├── local.yml                   # Ansible playbook — the complete fleet configuration
-├── files/
-│   └── company-wallpaper.jpg   # Corporate desktop wallpaper (deployed system-wide, locked)
-└── README.md                   # This file
+├── enroll.sh             # One-time enrollment script — run once on Day 1 as stpl
+├── local.yml             # Ansible playbook — keep in sync between NAS and GitHub
+└── README.md             # This file
+
+NAS (smb://172.26.3.101/softwares/ansible/ubuntu-fleet-config-main/):
+├── enroll.sh             # ← PRIMARY source for enrollment
+└── local.yml             # ← PRIMARY source for nightly sync (always update this)
+
+Installed on each laptop by enroll.sh:
+├── /usr/local/bin/fleet-sync.sh           # Nightly sync (NAS → GitHub → ansible)
+├── /usr/local/bin/safe-update.sh          # Update script — domain users can run this
+├── /etc/cron.d/ansible-fleet-pull         # Cron job — runs fleet-sync.sh at 02:00
+├── /etc/samba/nas-credentials             # NAS credentials (root-only, mode 600)
+└── /etc/dconf/profile/stpl               # Exempts stpl from all dconf locks
 ```
 
 ---
@@ -203,51 +230,51 @@ ubuntu-fleet-config/
 
 ### 1. Pre-flight Check
 
-- Aborts immediately if the OS is **not Ubuntu**, preventing accidental execution on unsupported systems (Debian, CentOS, etc.).
+- Aborts immediately if the OS is not Ubuntu.
 
 ---
 
 ### 2. Base Packages
 
-Installs the following standard tools on every managed machine:
-
 | Package | Purpose |
 |---|---|
 | `git` | Version control |
-| `curl` | HTTP client / download tool |
-| `htop` | Interactive process monitor |
-| `vim` | Terminal text editor |
+| `curl` | Download tool |
+| `htop` | Process monitor |
+| `vim` | Terminal editor |
 | `openssh-server` | Remote SSH access |
+| `cifs-utils` | NAS/SMB mounting |
+| `smbclient` | NAS file transfer |
 
-Also **disables `fwupd`** (firmware update daemon) to prevent uncontrolled firmware changes on endpoints.
+Also **disables `fwupd`** (firmware update daemon) to prevent uncontrolled firmware changes.
 
 ---
 
 ### 3. AD Privilege Control (sudoers)
 
-Deploys `/etc/sudoers.d/ad-policy` with the following rules:
+Deploys `/etc/sudoers.d/ad-policy`:
 
 | AD Group | GID | Permissions |
 |---|---|---|
 | `domain admins@sarvika.com` | `1405200512` | Full `sudo` (all commands) |
-| `domain users@sarvika.com` | `1405200513` | Password-less `sudo` for **safe-update.sh only** |
+| `domain users@sarvika.com` | `1405200513` | NOPASSWD for `safe-update.sh` only |
 
-Also deploys `/usr/local/bin/safe-update.sh` — a restricted wrapper that runs `apt update && apt upgrade -y && apt autoremove -y`. Domain users can trigger updates without full root access.
+Also deploys `/usr/local/bin/safe-update.sh` — domain users run it to update software without root access.
 
-**Sudo policy hardening:**
+**Sudo hardening:**
 - Session timeout: **15 minutes**
 - Max password attempts: **3**
 - All sudo activity logged to `/var/log/sudo.log`
+
+> 💡 **Note:** The `stpl` local account is NOT affected by these AD rules because it is a local Ubuntu account, not an AD account. It always retains full root access.
 
 ---
 
 ### 4. Automatic Security Patching
 
-Configures `/etc/apt/apt.conf.d/20auto-upgrades`:
-
-- **Daily** package list updates
-- **Daily** unattended security upgrades
-- **Weekly** apt cache auto-clean
+- Daily package list updates
+- Daily unattended security upgrades
+- Weekly apt cache auto-clean
 
 ---
 
@@ -255,117 +282,125 @@ Configures `/etc/apt/apt.conf.d/20auto-upgrades`:
 
 | Setting | Value |
 |---|---|
-| Autorun (removable media) | Disabled |
+| Autorun (USB/media) | Disabled |
 | Screen lock | Enabled |
-| Screen lock delay | 5 minutes (300 s) |
-| USB mass storage (`usb_storage`, `uas`) | Blacklisted via `/etc/modprobe.d/` |
-| Network hotspot creation | Blocked via Polkit for domain users |
-| Desktop wallpaper | Locked (users cannot change it) |
+| Screen lock delay | 5 minutes |
+| USB mass storage | Blacklisted |
+| Network hotspot creation | Blocked (Polkit) |
+| Desktop wallpaper | Locked to company wallpaper |
 
-All GNOME settings are enforced via `dconf` with system-level locks at `/etc/dconf/db/local.d/locks/`, making them impossible to override from user settings.
+> ✅ **stpl is exempt from all locks** — a special `/etc/dconf/profile/stpl` file with only `user-db:user` (no `system-db`) is created by `enroll.sh` so `stpl` can freely change wallpaper, settings, etc.
 
 ---
 
 ### 6. Corporate Wallpaper
 
-- Downloads `company-wallpaper.jpg` from the `files/` folder in this repository and deploys it to `/usr/share/backgrounds/`.
-- Configured as the system-wide GNOME background for both light and dark modes via `dconf`.
-- The background setting is **locked** — end users cannot change it even from GNOME Settings.
-
-> ⚠️ **Known Issue:** The download URL in `local.yml` currently uses `github.com/.../blob/...` (HTML page) instead of `raw.githubusercontent.com/...` (actual file). This will cause a 404 error. See [Troubleshooting](#troubleshooting--known-issues).
+- Deploys company wallpaper to `/usr/share/backgrounds/company-wallpaper.jpg`
+- Locked via `dconf` for all domain users — cannot be changed from GNOME Settings
 
 ---
 
 ### 7. Security Hardening
 
-#### fail2ban (SSH brute-force protection)
+**fail2ban** — SSH brute-force protection (max 15 retries, 1 hour ban)
 
-| Parameter | Value |
-|---|---|
-| Max retries | 15 |
-| Ban duration | 1 hour (3600 s) |
-| Detection window | 10 minutes (600 s) |
+**auditd** — watches `/etc/passwd`, `/etc/sudoers`, `/var/log/auth.log`, and all `execve` calls
 
-#### auditd (kernel audit logging)
+**AppArmor** — all profiles enforced
 
-Rules deployed to `/etc/audit/rules.d/hardening.rules`:
-
-- Watches `/etc/passwd` for write/attribute changes (`identity`)
-- Watches `/etc/sudoers` and `/etc/sudoers.d/` for changes (`sudoers_change`)
-- Watches `/var/log/auth.log` for changes (`auth_log`)
-- Logs all `execve` syscalls (`exec_log`)
-
-#### AppArmor
-
-- Enforced on all available profiles (`aa-enforce /etc/apparmor.d/*`)
-- Service enabled and running
-
-#### sysctl kernel hardening (`/etc/sysctl.d/99-hardening.conf`)
-
-| Setting | Value | Purpose |
-|---|---|---|
-| `net.ipv4.ip_forward` | `0` | Disable IP forwarding |
-| `net.ipv6.conf.all.forwarding` | `0` | Disable IPv6 forwarding |
-| `net.ipv4.tcp_syncookies` | `1` | SYN flood protection |
-| `kernel.randomize_va_space` | `2` | Full ASLR |
-| `net.ipv4.conf.all.accept_redirects` | `0` | Ignore ICMP redirects |
-| `net.ipv4.conf.all.send_redirects` | `0` | Don't send ICMP redirects |
-| `net.ipv4.conf.all.accept_source_route` | `0` | Ignore source-routed packets |
-| `net.ipv4.conf.all.log_martians` | `1` | Log martian packets |
-| `fs.suid_dumpable` | `0` | Disable setuid core dumps |
+**sysctl** — kernel hardening (ASLR, SYN flood protection, IP forwarding disabled, no ICMP redirects)
 
 ---
 
 ### 8. Legal Login Banners
 
-Deploys a legal notice to:
-
-- `/etc/issue.net` — shown to remote SSH users (pre-authentication)
-- `/etc/issue` — shown on local console login
-- SSH is configured to present `/etc/issue.net` via `Banner` directive in `sshd_config`
+Deploys a legal notice to `/etc/issue.net` (SSH) and `/etc/issue` (console).
 
 ---
 
 ### 9. Software Audit
 
-Deploys `/usr/local/bin/software-audit.sh` and schedules it via cron to run on the **1st of every month at 02:00**.
-
-The script logs all installed software (APT packages, Snap packages, and GUI `.desktop` apps) to syslog in the format:
+Runs monthly on the 1st at 02:00. Logs all installed packages (APT, Snap, GUI apps) to syslog:
 
 ```
 SoftwareAudit: OS=Ubuntu, Host=<hostname>, Date=<YYYY-MM-DD>, Type=<APT|Snap|GUI>, Pkg=<name>, Ver=<version>
 ```
 
-Rsyslog is configured to forward all `SoftwareAudit:` messages to the log aggregator at **`192.168.1.100:514`** (UDP syslog).
+Rsyslog forwards `SoftwareAudit:` entries to `192.168.1.100:514`.
 
 ---
 
-### 10. Centralized Logging / SIEM (Future)
+## Operations Cheat Sheet
 
-A commented-out rsyslog task is present in `local.yml` to forward **all** logs to a central SIEM at `siem.sarvika.com:514`. This is **not yet active** — uncomment and configure when a SIEM is available.
+### Update policies on all laptops (within 24 hours)
+1. Edit `local.yml` on your Windows PC.
+2. Copy `local.yml` to the NAS at:
+   `\\172.26.3.101\softwares\ansible\ubuntu-fleet-config-main\local.yml`
+3. Done — all laptops pick it up at 02:00 tonight.
 
----
+### Force an immediate update on a specific laptop
+SSH into the laptop (or open a terminal as `stpl`) and run:
+```bash
+sudo /usr/local/bin/fleet-sync.sh
+```
 
-## Requirements
+### Install software on ONE laptop manually (as stpl)
+```bash
+su - stpl
+sudo apt install ./software.deb
+# OR
+sudo apt install software-name
+```
 
-| Requirement | Detail |
-|---|---|
-| OS | Ubuntu (any version — other distros are rejected) |
-| Privileges | Must be run as `root` (or via `sudo`) |
-| Network | Outbound HTTPS to `raw.githubusercontent.com` |
-| Ansible | Installed automatically by `bootstrap.sh` |
+### Check if a laptop is enrolled
+```bash
+cat /etc/cron.d/ansible-fleet-pull          # Should show the nightly cron
+ls -la /usr/local/bin/fleet-sync.sh         # Should exist
+ls -la /etc/samba/nas-credentials           # Should exist (mode 600)
+```
+
+### See who has admin (sudo) access
+```bash
+getent group 1405200512   # Domain Admins — full sudo
+getent group 1405200513   # Domain Users — restricted
+```
+
+### Check what sudo permissions your account has
+```bash
+sudo -l
+```
+
+### Remove a domain user from a laptop
+```bash
+sudo userdel -r username@sarvika.com
+```
+
+### Check nightly sync logs
+```bash
+cat /var/log/ansible-fleet.log
+journalctl -t SARVIKA-FLEET
+journalctl -t SARVIKA-ENROLL
+```
 
 ---
 
 ## Scheduled Pull (Auto-Update)
 
-`bootstrap.sh` installs a cron job at `/etc/cron.d/ansible-fleet-pull` that runs **nightly at 02:00**:
+`enroll.sh` installs `/etc/cron.d/ansible-fleet-pull` on each laptop:
 
 ```cron
-0 2 * * * root curl -sfkL https://raw.githubusercontent.com/kunalislive/ubuntu-fleet-config/main/local.yml -o /tmp/local.yml && ansible-playbook /tmp/local.yml > /var/log/ansible-fleet.log 2>&1
+0 2 * * * root /usr/local/bin/fleet-sync.sh
 ```
 
-This means any change pushed to `local.yml` in this repository will automatically propagate to all enrolled machines within 24 hours — no manual push required.
+`fleet-sync.sh` runs every night at 02:00:
+
+```
+1. Try NAS (172.26.3.101) → /etc/samba/nas-credentials used automatically
+      └─ Success → run ansible-playbook
+2. NAS unreachable? → fetch local.yml from GitHub
+      └─ Success → run ansible-playbook
+3. Both fail? → log ERROR to syslog, exit (retry tomorrow)
+```
 
 ---
 
@@ -373,18 +408,20 @@ This means any change pushed to `local.yml` in this repository will automaticall
 
 | Log file | Contents |
 |---|---|
-| `/var/log/ansible-fleet.log` | Output of the nightly Ansible run |
+| `/var/log/ansible-fleet.log` | Output of every nightly Ansible run |
 | `/var/log/sudo.log` | All sudo command activity |
-| `/var/log/auth.log` | Authentication events (watched by auditd & fail2ban) |
-| syslog (`logger`) | Monthly software audit entries |
+| `/var/log/auth.log` | Authentication events |
+| `journalctl -t SARVIKA-FLEET` | NAS sync success / GitHub fallback / failures |
+| `journalctl -t SARVIKA-ENROLL` | Enrollment events per machine |
+| `journalctl -t SARVIKA-BOOTSTRAP` | (legacy) Enrollment events |
 
 ---
 
 ## Known Issues / TODO
 
-- [ ] SIEM forwarding (`siem.sarvika.com:514`) is commented out — enable once SIEM infrastructure is in place.
-- [ ] Software audit log aggregator IP (`192.168.1.100:514`) is hardcoded — consider making it a variable.
+- [ ] Software audit log aggregator IP (`192.168.1.100:514`) is hardcoded — make it a variable.
 - [ ] No idempotency guard on `aa-enforce` — minor harmless warning on every run.
+- [ ] Keep `local.yml` in sync between NAS and GitHub to avoid drift.
 
 ---
 
