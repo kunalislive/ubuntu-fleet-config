@@ -8,8 +8,8 @@
 
     - name: Abort if not Ubuntu
       fail:
-        msg: "This playbook is Ubuntu-only, refusing to run on {{ ansible_distribution }}"
-      when: ansible_distribution != "Ubuntu"
+        msg: "This playbook is Ubuntu-only, refusing to run on {{ ansible_facts['distribution'] }}"
+      when: ansible_facts['distribution'] != "Ubuntu"
 
     - name: Ensure required configuration directories exist
       file:
@@ -21,7 +21,10 @@
       loop:
         - /etc/dconf/db/local.d
         - /etc/dconf/db/local.d/locks
+        - /etc/dconf/db/domain-policy.d
+        - /etc/dconf/db/domain-policy.d/locks
         - /etc/polkit-1/localauthority/50-local.d
+        - /etc/dconf/profile
 
     # --- Base packages ---
 
@@ -69,6 +72,12 @@
           # 1405200513 = domain users@sarvika.com
           %#1405200513 ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
 
+    # NOTE: sssd.conf is managed by realmd/AD join — not touched by this playbook.
+
+    # NOTE: The stpl dconf profile (/etc/dconf/profile/stpl) is created ONCE
+    # manually during OS setup — this playbook does NOT touch the stpl account.
+    # See enrollment guide for the one-time stpl setup command.
+
     # --- Automatic patching ---
 
     - name: Configure background automatic security patching
@@ -82,11 +91,13 @@
           APT::Periodic::Unattended-Upgrade "1";
           APT::Periodic::AutocleanInterval "7";
 
-    # --- Desktop lockdown: screen lock, autorun, USB, hotspot ---
+    # --- Desktop lockdown: screen lock, autorun, hotspot ---
+    # ALL dconf restrictions go into domain-policy db ONLY.
+    # sptl profile = user-db:user only → never loads domain-policy → zero restrictions.
 
-    - name: Lock GNOME desktop settings (Disable autorun, enforce screen lock)
+    - name: Lock GNOME desktop settings for domain users (autorun + screen lock)
       copy:
-        dest: /etc/dconf/db/local.d/00-security-locks
+        dest: /etc/dconf/db/domain-policy.d/00-security-locks
         mode: '0644'
         owner: root
         group: root
@@ -97,6 +108,24 @@
           [org/gnome/desktop/screensaver]
           lock-enabled=true
           lock-delay=uint32 300
+      notify: update dconf
+
+    - name: Lock security settings so domain users cannot change them
+      copy:
+        dest: /etc/dconf/db/domain-policy.d/locks/00-security-locks
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          /org/gnome/desktop/media-handling/autorun-never
+          /org/gnome/desktop/screensaver/lock-enabled
+          /org/gnome/desktop/screensaver/lock-delay
+      notify: update dconf
+
+    - name: Remove old security locks from local db (cleanup — moved to domain-policy)
+      file:
+        path: /etc/dconf/db/local.d/00-security-locks
+        state: absent
       notify: update dconf
 
     - name: Blacklist USB Mass Storage Modules
@@ -127,40 +156,78 @@
 
     # --- Wallpaper ---
 
-    - name: Setting Sarvika Technologies wallpaper
-      get_url:
-        url: "https://github.com/kunalislive/ubuntu-fleet-config/blob/main/files/company-wallpaper.jpg"
-        dest: "/usr/share/backgrounds/company-wallapaper.jpg"
-        mode: '0644'
+    - name: Install smbclient for NAS wallpaper fetch
+      apt:
+        name: smbclient
+        state: present
 
-    - name: Configure dconf profile for system-wide settings
+    - name: Fetch company wallpaper from NAS (primary) or GitHub (fallback)
+      shell: |
+        NAS_HOST="172.26.3.101"
+        NAS_SHARE="softwares"
+        NAS_WALLPAPER_PATH="ansible/ubuntu-fleet-config-main/files/company-wallpaper.jpg"
+        GITHUB_URL="https://raw.githubusercontent.com/kunalislive/ubuntu-fleet-config/main/files/company-wallpaper.jpg"
+        DEST="/usr/share/backgrounds/company-wallpaper.jpg"
+        CREDENTIALS_FILE="/etc/samba/nas-credentials"
+
+        if [ -f "$CREDENTIALS_FILE" ]; then
+          SMBOPTS="-A $CREDENTIALS_FILE"
+        else
+          SMBOPTS="-N"
+        fi
+
+        if smbclient "//${NAS_HOST}/${NAS_SHARE}" $SMBOPTS \
+            -c "get ${NAS_WALLPAPER_PATH} ${DEST}" 2>/dev/null && [ -s "$DEST" ]; then
+          echo "Wallpaper fetched from NAS."
+        elif curl -sfkL "$GITHUB_URL" -o "$DEST" && [ -s "$DEST" ]; then
+          echo "Wallpaper fetched from GitHub (fallback)."
+        else
+          echo "WARNING: Could not fetch wallpaper from NAS or GitHub."
+          exit 1
+        fi
+        chmod 0644 "$DEST"
+      args:
+        creates: /usr/share/backgrounds/company-wallpaper.jpg
+
+    - name: Configure dconf profile for domain users (all restrictions apply)
       copy:
         dest: /etc/dconf/profile/user
         content: |
           user-db:user
-          system-db:local
+          system-db:domain-policy
         mode: '0644'
+      notify: update dconf
 
-    - name: Set default GNOME wallpaper
+    # NOTE: /etc/dconf/profile/sptl = "user-db:user" only.
+    # Created once by enroll.sh — never by this playbook.
+    # sptl loads NO system-db → zero dconf restrictions.
+
+    - name: Set default GNOME wallpaper (domain-policy db)
       copy:
-        dest: /etc/dconf/db/local.d/00-wallpaper
+        dest: /etc/dconf/db/domain-policy.d/00-wallpaper
         content: |
           [org/gnome/desktop/background]
-          picture-uri='file:///usr/share/backgrounds/sarvika-technologies-bg.jpg'
-          picture-uri-dark='file:///usr/share/backgrounds/sarvika-technologies-bg.jpg'
+          picture-uri='file:///usr/share/backgrounds/company-wallpaper.jpg'
+          picture-uri-dark='file:///usr/share/backgrounds/company-wallpaper.jpg'
           picture-options='zoom'
         mode: '0644'
       notify: update dconf
 
-    - name: Lock background settings so users cannot change them
+    - name: Lock background settings for domain users only (domain-policy db)
       copy:
-        dest: /etc/dconf/db/local.d/locks/00-background-lock
+        dest: /etc/dconf/db/domain-policy.d/locks/00-background-lock
         mode: '0644'
         owner: root
         group: root
         content: |
           /org/gnome/desktop/background/picture-uri
           /org/gnome/desktop/background/picture-uri-dark
+      notify: update dconf
+
+    - name: Remove old wallpaper lock from local db (cleanup)
+      file:
+        path: /etc/dconf/db/local.d/locks/00-background-lock
+        state: absent
       notify: update dconf
 
     # --- Security hardening: fail2ban, auditd, AppArmor, sysctl ---
@@ -394,3 +461,5 @@
 
     - name: update dconf
       command: dconf update
+      environment:
+        DBUS_SESSION_BUS_ADDRESS: ""
