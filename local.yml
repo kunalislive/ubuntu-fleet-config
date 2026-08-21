@@ -47,15 +47,27 @@
 
     # --- AD privilege control (sudoers) ---
 
+    - name: Remove immutable flag from safe-update.sh (allows Ansible to redeploy it)
+      command: chattr -i /usr/local/bin/safe-update.sh
+      failed_when: false
+      changed_when: false
+
     - name: Deploy restricted update script
       copy:
         dest: /usr/local/bin/safe-update.sh
-        mode: '0755'
+        mode: '0750'
         owner: root
         group: root
         content: |
           #!/bin/bash
+          # Security fix: flock prevents concurrent runs from corrupting dpkg state
+          exec 9>/var/lock/safe-update.lock
+          flock -n 9 || { echo "[safe-update] Another update is already running. Try again later."; exit 1; }
           /usr/bin/apt update && /usr/bin/apt upgrade -y && /usr/bin/apt autoremove -y
+
+    - name: Lock safe-update.sh immutable (prevent script replacement attack)
+      command: chattr +i /usr/local/bin/safe-update.sh
+      changed_when: false
 
     - name: Deploy AD privilege control rules
       copy:
@@ -69,8 +81,351 @@
           Defaults logfile="/var/log/sudo.log"
           # 1405200512 = domain admins@sarvika.com
           %#1405200512 ALL=(ALL:ALL) ALL
+          # TODO: Fill GID for the "full-access" power-user AD group below.
+          #   Run on a domain-joined machine: getent group "<GroupName>@sarvika.com"
+          #   Copy the number from the output, then uncomment and replace FILL_GID_HERE:
+          # %#FILL_GID_HERE ALL=(ALL:ALL) ALL
           # 1405200513 = domain users@sarvika.com
           %#1405200513 ALL=(ALL) NOPASSWD: /usr/local/bin/safe-update.sh
+          %#1405200513 ALL=(root) /usr/local/bin/safe-install.sh
+
+    - name: Create global aliases for fleet management scripts
+      copy:
+        dest: /etc/profile.d/fleet-aliases.sh
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          alias safe-update='sudo /usr/local/bin/safe-update.sh'
+          alias safe-install='sudo /usr/local/bin/safe-install.sh'
+
+    # --- Approved software installer (safe-install.sh) ---
+
+    - name: Remove immutable flag from safe-install.sh (allows Ansible to redeploy it)
+      command: chattr -i /usr/local/bin/safe-install.sh
+      failed_when: false
+      changed_when: false
+
+    - name: Deploy approved software installer (safe-install.sh)
+      copy:
+        dest: /usr/local/bin/safe-install.sh
+        mode: '0750'
+        owner: root
+        group: root
+        content: |
+          #!/bin/bash
+          # ============================================================================
+          #  safe-install.sh — Sarvika Technologies Approved Package Installer
+          #
+          #  Usage:
+          #    safe-install              →  interactive numbered menu (default)
+          #    safe-install --list       →  print full list and exit
+          #    safe-install <pkg-name>   →  install directly by package name
+          #
+          #  To ADD a package  : add a new line to CATALOG below ("name|APT|Category")
+          #  To REMOVE a package: delete or comment out its line in CATALOG
+          # ============================================================================
+          set -uo pipefail
+
+          # ── Package catalog ──────────────────────────────────────────────────────────
+          # Format: "package-name|TYPE|Category"
+          # TYPE must be exactly APT or SNAP
+          CATALOG=(
+            # ── Office & Productivity ──────────────────────────────────────────────
+            "libreoffice|APT|Office & Productivity"
+            "libreoffice-calc|APT|Office & Productivity"
+            "libreoffice-writer|APT|Office & Productivity"
+            "libreoffice-impress|APT|Office & Productivity"
+            "wps-office|SNAP|Office & Productivity"
+            # ── Media ─────────────────────────────────────────────────────────────
+            "vlc|APT|Media"
+            "mpv|APT|Media"
+            "audacity|APT|Media"
+            "gimp|APT|Media"
+            "inkscape|APT|Media"
+            "obs-studio|APT|Media"
+            "rhythmbox|APT|Media"
+            # ── Browsers ──────────────────────────────────────────────────────────
+            "firefox|APT|Browsers"
+            "chromium-browser|APT|Browsers"
+            "google-chrome-stable|APT|Browsers"
+            # ── Email & Messaging ──────────────────────────────────────────────────
+            "thunderbird|APT|Email & Messaging"
+            # ── Communication ─────────────────────────────────────────────────────
+            "slack|SNAP|Communication"
+            "zoom-client|SNAP|Communication"
+            "google-chat-electron|SNAP|Communication"
+            "spotify|SNAP|Communication"
+            # ── Remote Access & VPN ───────────────────────────────────────────────
+            "remmina|APT|Remote Access & VPN"
+            "openvpn|APT|Remote Access & VPN"
+            "network-manager-openvpn-gnome|APT|Remote Access & VPN"
+            "wireguard|APT|Remote Access & VPN"
+            "filezilla|APT|Remote Access & VPN"
+            "tightvncserver|APT|Remote Access & VPN"
+            "xtightvncviewer|APT|Remote Access & VPN"
+            # ── Editors & IDEs ────────────────────────────────────────────────────
+            "code|SNAP|Editors & IDEs"
+            "sublime-text|SNAP|Editors & IDEs"
+            "intellij-idea-community|SNAP|Editors & IDEs"
+            "pycharm-community|SNAP|Editors & IDEs"
+            "android-studio|SNAP|Editors & IDEs"
+            "eclipse|SNAP|Editors & IDEs"
+            "dbeaver-ce|SNAP|Editors & IDEs"
+            "gitkraken|SNAP|Editors & IDEs"
+            # ── API & Database Tools ──────────────────────────────────────────────
+            "postman|SNAP|API & Database Tools"
+            "mysql-workbench-community|SNAP|API & Database Tools"
+            "pgadmin4|SNAP|API & Database Tools"
+            # ── Dev — Languages & Runtimes ────────────────────────────────────────
+            "nodejs|APT|Dev - Languages & Runtimes"
+            "npm|APT|Dev - Languages & Runtimes"
+            "python3-pip|APT|Dev - Languages & Runtimes"
+            "default-jdk|APT|Dev - Languages & Runtimes"
+            "openjdk-17-jdk|APT|Dev - Languages & Runtimes"
+            "openjdk-11-jdk|APT|Dev - Languages & Runtimes"
+            "node|SNAP|Dev - Languages & Runtimes"
+            # ── Dev — Databases ───────────────────────────────────────────────────
+            "mysql-server|APT|Dev - Databases"
+            "mysql-client|APT|Dev - Databases"
+            "postgresql|APT|Dev - Databases"
+            "postgresql-client|APT|Dev - Databases"
+            # ── Dev — Tools ───────────────────────────────────────────────────────
+            "docker.io|APT|Dev - Tools"
+            "kubectl|APT|Dev - Tools"
+            "meld|APT|Dev - Tools"
+            "tmux|APT|Dev - Tools"
+            "git|APT|Dev - Tools"
+            # ── Screenshot & Clipboard ────────────────────────────────────────────
+            "flameshot|APT|Screenshot & Clipboard"
+            "ksnip|APT|Screenshot & Clipboard"
+            "shutter|APT|Screenshot & Clipboard"
+            "diodon|APT|Screenshot & Clipboard"
+            "copyq|APT|Screenshot & Clipboard"
+            # ── Design ────────────────────────────────────────────────────────────
+            "figma-linux|SNAP|Design"
+            # ── Utilities ─────────────────────────────────────────────────────────
+            "p7zip-full|APT|Utilities"
+            "xpad|APT|Utilities"
+            "shotwell|APT|Utilities"
+            "cheese|APT|Utilities"
+            "okular|APT|Utilities"
+            "wireshark|APT|Utilities"
+            "htop|APT|Utilities"
+          )
+
+          # ── Snap packages that require --classic ─────────────────────────────────
+          SNAP_CLASSIC=(
+            code sublime-text intellij-idea-community pycharm-community
+            android-studio eclipse dbeaver-ce postman node gitkraken
+          )
+
+          # ── Helper: check if a snap needs --classic ──────────────────────────────
+          is_classic() {
+            local pkg="$1"
+            for c in "${SNAP_CLASSIC[@]}"; do
+              [[ "$c" == "$pkg" ]] && return 0
+            done
+            return 1
+          }
+
+          # ── Helper: install one catalog entry ────────────────────────────────────
+          install_entry() {
+            local entry="$1"
+            local name type flag
+            name="${entry%%|*}"
+            type="${entry#*|}"; type="${type%%|*}"
+            if [[ "$type" == "APT" ]]; then
+              if dpkg-query -W -f='${Status}' "$name" 2>/dev/null | grep -q "install ok installed"; then
+                echo "[safe-install] ALREADY INSTALLED: '$name' is already on this machine."
+                echo "  To update it, run:  safe-update"
+              else
+                echo "[safe-install] Installing via apt: $name"
+                /usr/bin/apt install -y "$name"
+              fi
+            else
+              if /usr/bin/snap list "$name" &>/dev/null; then
+                echo "[safe-install] ALREADY INSTALLED: '$name' snap is already on this machine."
+                echo "  To update it, run:  sudo snap refresh $name"
+              else
+                flag=""
+                if is_classic "$name"; then flag="--classic"; fi
+                echo "[safe-install] Installing via snap: $name $flag"
+                /usr/bin/snap install "$name" $flag
+              fi
+            fi
+          }
+
+          # ── Helper: print the numbered menu ─────────────────────────────────────
+          show_menu() {
+            local prev_cat="" i=1 name type cat entry
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║        Sarvika Technologies — Approved Software Installer    ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+            printf "  %-5s  %-40s  %s\n" "No." "Package" "Type"
+            printf "  %-5s  %-40s  %s\n" "-----" "----------------------------------------" "------"
+            for entry in "${CATALOG[@]}"; do
+              name="${entry%%|*}"
+              type="${entry#*|}"; type="${type%%|*}"
+              cat="${entry##*|}"
+              if [[ "$cat" != "$prev_cat" ]]; then
+                echo ""
+                printf "  ── %s\n" "$cat"
+                prev_cat="$cat"
+              fi
+              printf "  %-5s  %-40s  [%s]\n" "${i}." "$name" "$type"
+              i=$((i+1))
+            done
+            echo ""
+          }
+
+          # ── Mode: direct package name (backward-compatible) ──────────────────────
+          if [[ $# -ge 1 && "$1" != "--list" && "$1" != "-l" ]]; then
+            PKG="$1"
+            for entry in "${CATALOG[@]}"; do
+              if [[ "${entry%%|*}" == "$PKG" ]]; then
+                install_entry "$entry"
+                exit 0
+              fi
+            done
+            echo "[safe-install] ERROR: '$PKG' is not on the approved list."
+            echo "  Run: safe-install --list   to see all approved packages."
+            echo "  Contact IT Infrastructure to request additions."
+            exit 1
+          fi
+
+          # ── Mode: list only ──────────────────────────────────────────────────────
+          if [[ $# -ge 1 && ("$1" == "--list" || "$1" == "-l") ]]; then
+            show_menu
+            exit 0
+          fi
+
+          # ── Mode: interactive menu (default — no args) ───────────────────────────
+          show_menu
+          echo "  How to select:"
+          echo "    Single    →  5"
+          echo "    Multiple  →  1,3,7   or   1 3 7"
+          echo "    Range     →  1-5"
+          echo "    All       →  all"
+          echo "    Quit      →  q"
+          echo ""
+          printf "  Your selection: "
+          read -r SELECTION
+
+          if [[ "$SELECTION" == "q" || "$SELECTION" == "Q" ]]; then
+            echo "Cancelled."
+            exit 0
+          fi
+
+          TOTAL=${#CATALOG[@]}
+          declare -A TO_INSTALL
+
+          # ── Parse & validate — retry loop until input is clean ───────────────────
+          while true; do
+            unset TO_INSTALL; declare -A TO_INSTALL
+            HAS_ERROR=0
+
+            if [[ "$SELECTION" == "all" || "$SELECTION" == "ALL" ]]; then
+              for ((i=1; i<=TOTAL; i++)); do TO_INSTALL[$i]=1; done
+
+            elif [[ -z "${SELECTION// /}" ]]; then
+              echo ""
+              echo "  [ERROR] No input entered. Please enter a number, range, or 'all'."
+              HAS_ERROR=1
+
+            else
+              NORM="${SELECTION//,/ }"
+              # read -ra prevents glob expansion (*,?,[ etc.) that unquoted $NORM would allow
+              IFS=' ' read -ra tokens <<< "$NORM"
+              for token in "${tokens[@]}"; do
+                if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                  s="${BASH_REMATCH[1]}"
+                  e="${BASH_REMATCH[2]}"
+                  if (( s > e )); then
+                    echo "  [ERROR] Invalid range '$token': start ($s) is greater than end ($e). Did you mean ${e}-${s}?"
+                    HAS_ERROR=1
+                  elif (( s < 1 || e > TOTAL )); then
+                    echo "  [ERROR] Range '$token' is out of bounds. Valid numbers: 1–$TOTAL."
+                    HAS_ERROR=1
+                  else
+                    for ((n=s; n<=e; n++)); do TO_INSTALL[$n]=1; done
+                  fi
+                elif [[ "$token" =~ ^[0-9]+$ ]]; then
+                  if (( token < 1 || token > TOTAL )); then
+                    echo "  [ERROR] '$token' is out of range. Valid numbers: 1–$TOTAL."
+                    HAS_ERROR=1
+                  else
+                    TO_INSTALL[$token]=1
+                  fi
+                else
+                  echo "  [ERROR] '$token' is not valid. Use numbers, ranges (e.g. 1-5), or 'all'."
+                  HAS_ERROR=1
+                fi
+              done
+            fi
+
+            # Exit loop only when there are no errors AND at least one package selected
+            if [[ $HAS_ERROR -eq 0 && ${#TO_INSTALL[@]} -gt 0 ]]; then
+              break
+            elif [[ $HAS_ERROR -eq 0 && ${#TO_INSTALL[@]} -eq 0 ]]; then
+              echo "  [ERROR] No packages selected."
+            fi
+
+            echo ""
+            printf "  Re-enter selection (or 'q' to quit): "
+            read -r SELECTION
+            [[ "$SELECTION" == "q" || "$SELECTION" == "Q" ]] && { echo "Cancelled."; exit 0; }
+          done
+
+          echo ""
+          echo "  Packages queued for installation:"
+          for idx in $(printf '%s\n' "${!TO_INSTALL[@]}" | sort -n); do
+            entry="${CATALOG[$((idx-1))]}"
+            name="${entry%%|*}"
+            type="${entry#*|}"; type="${type%%|*}"
+            printf "    %-5s  %-40s  [%s]\n" "${idx}." "$name" "$type"
+          done
+
+          echo ""
+          printf "  Proceed with installation? (y/N): "
+          read -r CONFIRM
+          if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+            echo "Cancelled."
+            exit 0
+          fi
+
+          echo ""
+          FAILED=()
+          for idx in $(printf '%s\n' "${!TO_INSTALL[@]}" | sort -n); do
+            entry="${CATALOG[$((idx-1))]}"
+            install_entry "$entry" || FAILED+=("${entry%%|*}")
+          done
+
+          echo ""
+          if [[ ${#FAILED[@]} -gt 0 ]]; then
+            echo "[safe-install] The following packages failed to install:"
+            printf '    x %s\n' "${FAILED[@]}"
+            exit 1
+          fi
+          echo "[safe-install] All selected packages installed successfully."
+
+    - name: Lock safe-install.sh immutable (prevent script replacement attack)
+      command: chattr +i /usr/local/bin/safe-install.sh
+      changed_when: false
+
+    - name: Remove ubuntu local group sudoers bypass (Ubuntu 24.04+ security hardening)
+      file:
+        path: /etc/sudoers.d/ubuntu
+        state: absent
+
+    - name: Enforce classic GNU sudo (prevent sudo-rs breaking AD group policy on Ubuntu 24.04+)
+      shell: |
+        if update-alternatives --list sudo 2>/dev/null | grep -q '/usr/bin/sudo.ws'; then
+          update-alternatives --set sudo /usr/bin/sudo.ws
+        fi
+      changed_when: false
 
     # NOTE: sssd.conf is managed by realmd/AD join — not touched by this playbook.
 
@@ -90,6 +445,13 @@
           APT::Periodic::Update-Package-Lists "1";
           APT::Periodic::Unattended-Upgrade "1";
           APT::Periodic::AutocleanInterval "7";
+
+    - name: Schedule daily safe-update
+      cron:
+        name: "Daily safe-update execution"
+        minute: "0"
+        hour: "4"
+        job: "/usr/local/bin/safe-update.sh"
 
     # --- Desktop lockdown: screen lock, autorun, hotspot ---
     # ALL dconf restrictions go into domain-policy db ONLY.
@@ -179,7 +541,7 @@
         if smbclient "//${NAS_HOST}/${NAS_SHARE}" $SMBOPTS \
             -c "get ${NAS_WALLPAPER_PATH} ${DEST}" 2>/dev/null && [ -s "$DEST" ]; then
           echo "Wallpaper fetched from NAS."
-        elif curl -sfkL "$GITHUB_URL" -o "$DEST" && [ -s "$DEST" ]; then
+        elif curl -sfL "$GITHUB_URL" -o "$DEST" && [ -s "$DEST" ]; then
           echo "Wallpaper fetched from GitHub (fallback)."
         else
           echo "WARNING: Could not fetch wallpaper from NAS or GitHub."
@@ -230,40 +592,40 @@
         state: absent
       notify: update dconf
 
-    # --- Security hardening: fail2ban, auditd, AppArmor, sysctl ---
+    # --- Security hardening: auditd, AppArmor, sysctl ---
 
     - name: Install security hardening packages
       apt:
         name:
-          - fail2ban
+          # - fail2ban
           - auditd
           - apparmor
           - apparmor-utils
         state: present
         update_cache: yes
 
-    - name: Configure fail2ban for SSH brute-force protection
-      copy:
-        dest: /etc/fail2ban/jail.local
-        mode: '0644'
-        owner: root
-        group: root
-        content: |
-          [sshd]
-          enabled = true
-          port = ssh
-          filter = sshd
-          logpath = /var/log/auth.log
-          maxretry = 15
-          bantime = 3600
-          findtime = 600
-
-    - name: Enable and start fail2ban
-      systemd:
-        name: fail2ban
-        enabled: yes
-        state: started
-        daemon_reload: yes
+    # - name: Configure fail2ban for SSH brute-force protection
+    #   copy:
+    #     dest: /etc/fail2ban/jail.local
+    #     mode: '0644'
+    #     owner: root
+    #     group: root
+    #     content: |
+    #       [sshd]
+    #       enabled = true
+    #       port = ssh
+    #       filter = sshd
+    #       logpath = /var/log/auth.log
+    #       maxretry = 15
+    #       bantime = 3600
+    #       findtime = 600
+    # 
+    # - name: Enable and start fail2ban
+    #   systemd:
+    #     name: fail2ban
+    #     enabled: yes
+    #     state: started
+    #     daemon_reload: yes
 
     - name: Enable and start auditd
       systemd:
@@ -376,6 +738,46 @@
       when: sshd_config_check.stat.exists
       notify: restart sshd
 
+    - name: Harden SSH — disable root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      when: sshd_config_check.stat.exists
+      notify: restart sshd
+
+    - name: Harden SSH — limit authentication attempts
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?MaxAuthTries'
+        line: 'MaxAuthTries 3'
+      when: sshd_config_check.stat.exists
+      notify: restart sshd
+
+    - name: Harden SSH — disable X11 forwarding
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?X11Forwarding'
+        line: 'X11Forwarding no'
+      when: sshd_config_check.stat.exists
+      notify: restart sshd
+
+    - name: Harden SSH — idle session timeout (5 minutes)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveInterval'
+        line: 'ClientAliveInterval 300'
+      when: sshd_config_check.stat.exists
+      notify: restart sshd
+
+    - name: Harden SSH — disconnect after 2 missed keepalives
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveCountMax'
+        line: 'ClientAliveCountMax 2'
+      when: sshd_config_check.stat.exists
+      notify: restart sshd
+
     # --- Software audit ---
 
     - name: Deploy monthly software audit script
@@ -390,27 +792,31 @@
           DATE=$(date +%Y-%m-%d)
           declare -A SEEN_PKGS
 
-          for pkg in $(apt-mark showmanual); do
+          # Security fix: mapfile prevents word-splitting on package names with spaces
+          mapfile -t _apt_pkgs < <(apt-mark showmanual)
+          for pkg in "${_apt_pkgs[@]}"; do
               pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
-              if [[ -z "${SEEN_PKGS[$pkg_lower]}" ]]; then
+              if [[ -z "${SEEN_PKGS[$pkg_lower]:-}" ]]; then
                   SEEN_PKGS[$pkg_lower]=1
                   VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || echo "Unknown")
                   echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=APT, Pkg=${pkg}, Ver=${VER}" | logger
               fi
           done
 
-          for pkg in $(snap list 2>/dev/null | awk 'NR>1 {print $1}'); do
+          mapfile -t _snap_pkgs < <(snap list 2>/dev/null | awk 'NR>1 {print $1}')
+          for pkg in "${_snap_pkgs[@]}"; do
               pkg_lower=$(echo "$pkg" | tr '[:upper:]' '[:lower:]')
-              if [[ -z "${SEEN_PKGS[$pkg_lower]}" ]]; then
+              if [[ -z "${SEEN_PKGS[$pkg_lower]:-}" ]]; then
                   SEEN_PKGS[$pkg_lower]=1
                   VER=$(snap list "$pkg" | awk 'NR>1 {print $2}')
                   echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=Snap, Pkg=${pkg}, Ver=${VER}" | logger
               fi
           done
 
-          for app in $(ls /usr/share/applications 2>/dev/null | grep '\.desktop$' | sed 's/\.desktop//g'); do
+          mapfile -t _gui_apps < <(ls /usr/share/applications 2>/dev/null | grep '\.desktop$' | sed 's/\.desktop//g')
+          for app in "${_gui_apps[@]}"; do
               app_lower=$(echo "$app" | tr '[:upper:]' '[:lower:]')
-              if [[ -z "${SEEN_PKGS[$app_lower]}" ]]; then
+              if [[ -z "${SEEN_PKGS[$app_lower]:-}" ]]; then
                   SEEN_PKGS[$app_lower]=1
                   echo "SoftwareAudit: OS=Ubuntu, Host=${HOSTNAME}, Date=${DATE}, Type=GUI, Pkg=${app}, Ver=N/A" | logger
               fi
@@ -463,3 +869,5 @@
       command: dconf update
       environment:
         DBUS_SESSION_BUS_ADDRESS: ""
+      register: dconf_result
+      failed_when: dconf_result.rc != 0

@@ -20,7 +20,9 @@ NAS_BASE_PATH="ansible/ubuntu-fleet-config-main"
 GITHUB_URL="https://raw.githubusercontent.com/kunalislive/ubuntu-fleet-config/main/local.yml"
 MOUNT_POINT="/mnt/nas-softwares"
 CREDS_FILE="/etc/samba/nas-credentials"   # permanent — used by cron and ansible
-PLAYBOOK="/tmp/local.yml"
+# Security fix: private temp dir prevents TOCTOU symlink attacks on /tmp
+TMPDIR_ENROLL=$(mktemp -d /root/enroll-XXXXXX)
+PLAYBOOK="$TMPDIR_ENROLL/local.yml"
 LOG_TAG="SARVIKA-ENROLL"
 
 # ── Colour helpers ─────────────────────────────────────────────────────────────
@@ -34,7 +36,7 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*"; exit 1; }
 
 # ── Cleanup trap — unmounts NAS on exit and deletes script ─────────────────────
 cleanup() {
-    rm -f "$PLAYBOOK" 2>/dev/null || true
+    rm -rf "$TMPDIR_ENROLL" 2>/dev/null || true
     rm -f /tmp/enroll.sh 2>/dev/null || true
     mountpoint -q "$MOUNT_POINT" 2>/dev/null && umount "$MOUNT_POINT" 2>/dev/null || true
 }
@@ -142,7 +144,8 @@ fi
 # Fall back to GitHub
 if [ "$NAS_FETCH_OK" = false ]; then
     warn "NAS fetch failed — falling back to GitHub..."
-    if curl -sfkL "$GITHUB_URL" -o "$PLAYBOOK" && [ -s "$PLAYBOOK" ]; then
+    # Security fix: removed -k (TLS certificate verification now enforced)
+    if curl -sfL "$GITHUB_URL" -o "$PLAYBOOK" && [ -s "$PLAYBOOK" ]; then
         success "local.yml fetched from GitHub (fallback)"
     else
         error "Could not fetch local.yml from NAS or GitHub. Check network/credentials."
@@ -162,6 +165,9 @@ success "Fleet policies applied"
 # ── Step 5 — Install nightly auto-sync cron job ───────────────────────────────
 info "Step 5/5 — Installing nightly auto-sync..."
 
+# Security: remove immutable flag first so re-enrollment can overwrite fleet-sync.sh
+chattr -i /usr/local/bin/fleet-sync.sh 2>/dev/null || true
+
 cat > /usr/local/bin/fleet-sync.sh << 'SYNC_SCRIPT'
 #!/bin/bash
 # Sarvika Fleet — nightly policy sync
@@ -172,9 +178,10 @@ NAS_YML_PATH="ansible/ubuntu-fleet-config-main/local.yml"
 GITHUB_URL="https://raw.githubusercontent.com/kunalislive/ubuntu-fleet-config/main/local.yml"
 CREDENTIALS_FILE="/etc/samba/nas-credentials"
 LOG_TAG="SARVIKA-FLEET"
-DEST="/tmp/local.yml"
-
-rm -f "$DEST"
+# Security fix: private temp file prevents TOCTOU attacks on /tmp
+DEST=$(mktemp /root/fleet-XXXXXX.yml)
+_cleanup_fleet() { rm -f "$DEST" 2>/dev/null || true; }
+trap _cleanup_fleet EXIT
 
 if [ -f "$CREDENTIALS_FILE" ]; then
     SMBOPTS="-A $CREDENTIALS_FILE"
@@ -185,7 +192,7 @@ fi
 if smbclient "//${NAS_HOST}/${NAS_SHARE}" $SMBOPTS \
     -c "get ${NAS_YML_PATH} ${DEST}" 2>/dev/null && [ -s "$DEST" ]; then
     logger -t "$LOG_TAG" "INFO: local.yml synced from NAS on $(hostname)"
-elif curl -sfkL "$GITHUB_URL" -o "$DEST" && [ -s "$DEST" ]; then
+elif curl -sfL "$GITHUB_URL" -o "$DEST" && [ -s "$DEST" ]; then
     logger -t "$LOG_TAG" "WARN: NAS unreachable — used GitHub fallback on $(hostname)"
 else
     logger -t "$LOG_TAG" "ERROR: local.yml sync FAILED on $(hostname)"
@@ -195,7 +202,8 @@ fi
 ansible-playbook "$DEST" >> /var/log/ansible-fleet.log 2>&1
 SYNC_SCRIPT
 
-chmod +x /usr/local/bin/fleet-sync.sh
+chmod 0750 /usr/local/bin/fleet-sync.sh
+chattr +i /usr/local/bin/fleet-sync.sh  # immutable: prevents replacement attack
 
 # Install cron — runs nightly at 02:00
 echo "0 2 * * * root /usr/local/bin/fleet-sync.sh" > /etc/cron.d/ansible-fleet-pull
