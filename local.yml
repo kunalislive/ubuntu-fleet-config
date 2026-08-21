@@ -126,6 +126,9 @@
           #  To ADD a package  : add a new line to CATALOG below ("name|APT|Category")
           #  To REMOVE a package: delete or comment out its line in CATALOG
           # ============================================================================
+          # Self-re-exec guard: if not running under bash, re-launch with bash.
+          # This makes "sudo safe-install.sh" work even if invoked via sh/dash.
+          [ -z "$BASH_VERSION" ] && exec bash "$0" "$@"
           set -uo pipefail
 
           # ── Package catalog ──────────────────────────────────────────────────────────
