@@ -113,6 +113,7 @@
         owner: root
         group: root
         content: |
+          {% raw %}
           #!/bin/bash
           # ============================================================================
           #  safe-install.sh — Sarvika Technologies Approved Package Installer
@@ -410,6 +411,7 @@
             exit 1
           fi
           echo "[safe-install] All selected packages installed successfully."
+          {% endraw %}
 
     - name: Lock safe-install.sh immutable (prevent script replacement attack)
       command: chattr +i /usr/local/bin/safe-install.sh

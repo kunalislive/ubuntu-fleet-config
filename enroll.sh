@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# ── Ensure UTF-8 Locale for Ansible ────────────────────────────────────────────
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
 # ── NAS settings ───────────────────────────────────────────────────────────────
 NAS_HOST="172.26.3.101"
 NAS_SHARE="softwares"
